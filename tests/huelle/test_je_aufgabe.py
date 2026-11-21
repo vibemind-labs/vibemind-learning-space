@@ -764,6 +764,12 @@ class KursBewerter:
         self.daten.append(daten)
         return self.antwort
 
+    gelernt_antwort: dict[str, Any] | None = None
+
+    def gelernt(self, daten: dict[str, Any]) -> dict[str, Any] | None:
+        self.__dict__.setdefault("gelernt_daten", []).append(daten)
+        return self.gelernt_antwort
+
 def _kurs_oeffnen(ll: ListenLern, tmp_path: Path, bewerter: Any = None, penecho: FakePenEcho | None = None
                   ) -> tuple[TestClient, FakePenEcho]:
     ll.lern.antworten["learning_task_bewertungsdaten"] = lambda kw: {}
@@ -1805,3 +1811,71 @@ def test_zusammenfassung_ohne_erreichbare_notizen_entsteht_trotzdem(tmp_path: Pa
         assert client.get(f"/lernen/api/sitzungen/{SID}/zusammenfassung.pdf").status_code == 200
     finally:
         bruecke.beenden()
+
+# ---- „Das haben Sie gelernt“ in der Zusammenfassung -------------------------------------------------------------
+GELERNT_ANTWORT = {"grader": "ki_flaeche", "kernpunkte": ["Ein Quick Win hat hohen Nutzen bei geringem Aufwand."],
+                   "sitzt": [], "wiederholen": ["Die Begründung der Risikoklasse."], "offen": ["Onepager"]}
+
+
+def _pdf_text(antwort: Any) -> str:
+    import io
+
+    import pypdf
+
+    assert antwort.status_code == 200, antwort.text
+    return " ".join(" ".join((s.extract_text() or "").split()) for s in pypdf.PdfReader(io.BytesIO(antwort.content)).pages)
+
+
+def test_zusammenfassung_fragt_die_flaechen_ki_was_gelernt_wurde(tmp_path: Path) -> None:
+    bewerter = KursBewerter(None)
+    bewerter.gelernt_antwort = GELERNT_ANTWORT
+    client, _ = _kurs_oeffnen(_neu_lern(3), tmp_path, bewerter)
+    bruecke = client.app
+    adresse = f"/lernen/api/sitzungen/{SID}/zusammenfassung.pdf"
+    try:
+        bruecke._ki_schritt_merken(SID, 2, "solve")  # Aufgabe 2 ist begonnen: es gibt etwas Gelerntes
+        text = _pdf_text(client.get(adresse, headers={KOPF: KA}))
+        assert "Das haben Sie gelernt" in text and "Ein Quick Win hat hohen Nutzen bei geringem Aufwand." in text
+        (daten,) = bewerter.gelernt_daten
+        assert set(daten) == {"kurs", "aufgaben", "begriffe", "notizen"}
+        assert [a["stand"] for a in daten["aufgaben"]] == ["offen", "in Arbeit", "offen"]
+        # Derselbe Stand: die Antwort kommt aus dem Speicher (auch nach einem Neustart: sie liegt auf Platte).
+        assert "Das haben Sie gelernt" in _pdf_text(client.get(adresse, headers={KOPF: KA}))
+        assert len(bewerter.gelernt_daten) == 1
+        gespeichert = json.loads((tmp_path / "gelernt.json").read_text(encoding="utf-8"))
+        assert gespeichert[SID]["kernpunkte"] == GELERNT_ANTWORT["kernpunkte"] and len(gespeichert[SID]["stand"]) == 64
+        assert bruecke._gelernt_lesen_datei() == gespeichert
+        # Neuer Stand (eine weitere Aufgabe begonnen): die Flaechen-KI wird neu gefragt.
+        bruecke._ki_schritt_merken(SID, 3, "solve")
+        _pdf_text(client.get(adresse, headers={KOPF: KA}))
+        assert len(bewerter.gelernt_daten) == 2
+    finally:
+        bruecke.beenden()
+
+
+def test_zusammenfassung_ohne_antwort_der_flaechen_ki_entsteht_ohne_die_seite(tmp_path: Path) -> None:
+    class Kaputt(KursBewerter):
+        def gelernt(self, daten: dict[str, Any]) -> dict[str, Any] | None:
+            raise RuntimeError("weg")
+
+    for bewerter in (KursBewerter(None), Kaputt(None), None):
+        ordner = tmp_path / str(id(bewerter))
+        client, _ = _kurs_oeffnen(_neu_lern(2), ordner, bewerter)
+        try:
+            client.app._ki_schritt_merken(SID, 1, "solve")
+            text = _pdf_text(client.get(f"/lernen/api/sitzungen/{SID}/zusammenfassung.pdf", headers={KOPF: KA}))
+            assert "Alle Aufgaben" in text and "Das haben Sie gelernt" not in text
+            assert not (ordner / "gelernt.json").exists()  # nichts gespeichert: der naechste Abruf fragt erneut
+        finally:
+            client.app.beenden()
+
+
+def test_zusammenfassung_fragt_nicht_ohne_bearbeitete_aufgabe(tmp_path: Path) -> None:
+    bewerter = KursBewerter(None)
+    bewerter.gelernt_antwort = GELERNT_ANTWORT
+    client, _ = _kurs_oeffnen(_neu_lern(2), tmp_path, bewerter)
+    try:
+        text = _pdf_text(client.get(f"/lernen/api/sitzungen/{SID}/zusammenfassung.pdf", headers={KOPF: KA}))
+        assert "Das haben Sie gelernt" not in text and not hasattr(bewerter, "gelernt_daten")
+    finally:
+        client.app.beenden()

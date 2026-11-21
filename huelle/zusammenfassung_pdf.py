@@ -28,11 +28,11 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
-    Flowable, Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    Flowable, Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 from .zusammenfassung import (
-    NICHT_BEARBEITET, AufgabeZeile, Zusammenfassung, _einzeilig, ki_genutzt, ohne_latex,
+    AufgabeZeile, Zusammenfassung, _einzeilig, ki_genutzt, ohne_latex, status_von,
 )
 
 # Farben der Huelle (huelle.css), damit Seite und PDF zusammengehoeren.
@@ -89,6 +89,7 @@ def _stil(name: str, **werte: Any) -> ParagraphStyle:
 
 TEXT = _stil("text")
 PUNKT = _stil("punkt", leftIndent=10, bulletIndent=1)
+KERNPUNKT = _stil("kernpunkt", fontSize=10.5, leading=15, leftIndent=12, bulletIndent=1)
 FRAGE = _stil("frage", fontName=_FETT, spaceBefore=2)
 KLEIN = _stil("klein", fontSize=8.2, leading=11.5, textColor=GRAU)
 MARKE = _stil("marke", fontName=_FETT, fontSize=7.4, leading=10, textColor=GRAU)
@@ -104,23 +105,6 @@ ZAHL_TEXT = _stil("zahltext", fontSize=8.5, leading=11, alignment=TA_CENTER, tex
 def _x(text: object) -> str:
     """Klartext fuer einen ReportLab-Absatz: Formeln umgeschrieben, einzeilig, XML-Zeichen maskiert."""
     return escape(_einzeilig(ohne_latex(str(text))))
-
-
-def status_von(a: AufgabeZeile) -> str:
-    """„richtig“ | „teilweise“ | „falsch“ | „leer“ (gebucht ohne Abgabe) | „arbeit“ (begonnen, noch nichts
-    abgegeben) | „offen“."""
-    if a.ergebnis == NICHT_BEARBEITET:
-        return "leer"
-    if a.urteil in ("richtig", "teilweise", "falsch"):
-        return a.urteil
-    k = _einzeilig(a.kernaussage)
-    if a.richtig or k.startswith("Richtig"):
-        return "richtig"
-    if k.startswith("Teilweise"):
-        return "teilweise"
-    if not k or k == "–":
-        return "arbeit" if a.begonnen else "offen"
-    return "falsch"
 
 
 def erster_satz(text: str) -> str:
@@ -273,6 +257,27 @@ def _kursrueckmeldung(z: Zusammenfassung) -> list[Any]:
     teile: list[Any] = [Spacer(1, 7 * mm), Paragraph("Kursrückmeldung", ABSCHNITT)]
     for titel, text in z.abschnitte():
         teile += [Paragraph(escape(titel.upper()), MARKE), Paragraph(_x(text), TEXT), Spacer(1, 3 * mm)]
+    return teile
+
+
+def _gelernt(z: Zusammenfassung) -> list[Any]:
+    """Eigene Seite „Das haben Sie gelernt“: die Kernpunkte als Karte, darunter die nicht leeren Listen. Ohne
+    Antwort der Flaechen-KI gibt es die Seite nicht."""
+    g = z.gelernt
+    if g is None or not g.kernpunkte:
+        return []
+    punkte = [Paragraph(_x(p), KERNPUNKT, bulletText="•") for p in g.kernpunkte]
+    karte = Table([[p] for p in punkte], colWidths=[BREITE])
+    karte.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), PAPIER), ("ROUNDEDCORNERS", [6, 6, 6, 6]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5 * mm), ("RIGHTPADDING", (0, 0), (-1, -1), 5 * mm),
+        ("TOPPADDING", (0, 0), (-1, -1), 2.2 * mm), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.2 * mm),
+        ("TOPPADDING", (0, 0), (-1, 0), 4.5 * mm), ("BOTTOMPADDING", (0, -1), (-1, -1), 4.5 * mm),
+    ]))
+    teile: list[Any] = [PageBreak(), Paragraph("Das haben Sie gelernt", ABSCHNITT), Spacer(1, 1 * mm), karte]
+    for titel, liste in g.abschnitte():
+        teile += [Spacer(1, 5 * mm), Paragraph(escape(titel.upper()), MARKE), Spacer(1, 1 * mm),
+                  *(Paragraph(_x(p), PUNKT, bulletText="•") for p in liste)]
     return teile
 
 
@@ -440,7 +445,7 @@ def als_pdf(z: Zusammenfassung) -> bytes:
     puffer = io.BytesIO()
     doc = SimpleDocTemplate(puffer, pagesize=A4, leftMargin=RAND, rightMargin=RAND, topMargin=19 * mm,
                             bottomMargin=17 * mm, title=f"{kurs} – Zusammenfassung", author="Lern-Hülle")
-    doc.build([*_kopfblock(z, zaehler), *_tabelle(z), *_kursrueckmeldung(z), *_karten(z), *_notizen(z),
+    doc.build([*_kopfblock(z, zaehler), *_tabelle(z), *_gelernt(z), *_kursrueckmeldung(z), *_karten(z), *_notizen(z),
                *_begriffe(z)],
               canvasmaker=zeichner)
     return puffer.getvalue()

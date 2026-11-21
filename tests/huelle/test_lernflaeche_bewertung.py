@@ -146,3 +146,23 @@ def test_einstellung_bewertungsschluessel_zu_kurz() -> None:
     with pytest.raises(RuntimeError, match="LEARNING_HUELLE_BEWERTUNG_SCHLUESSEL ist zu kurz") as fehler:
         einstellung_lesen({**_BASIS, "LEARNING_HUELLE_BEWERTUNG_SCHLUESSEL": "kurz"})
     assert "kurz" not in str(fehler.value).replace("zu kurz", "")
+
+
+def test_gelernt_schickt_schluessel_und_daten_an_den_eigenen_endpunkt(caplog: pytest.LogCaptureFixture) -> None:
+    gesehen: list[httpx.Request] = []
+    gut = {"grader": "ki_flaeche", "kernpunkte": ["k"], "sitzt": [], "wiederholen": [], "offen": []}
+
+    def handler(anfrage: httpx.Request) -> httpx.Response:
+        gesehen.append(anfrage)
+        return httpx.Response(200, json=gut)
+
+    daten = {"kurs": "K", "aufgaben": [], "begriffe": [], "notizen": []}
+    assert _bewerter(handler).gelernt(daten) == gut
+    (anfrage,) = gesehen
+    assert anfrage.method == "POST" and anfrage.url == httpx.URL(f"{URL}/api/lernflaeche/gelernt")
+    assert anfrage.headers["X-Lernflaeche-Bewertung"] == SCHLUESSEL and json.loads(anfrage.content) == {"daten": daten}
+    # Alte Lernflaeche ohne den Endpunkt (404), kein Schluessel: None, nie eine Ausnahme, nichts Geheimes im Log.
+    with caplog.at_level(logging.DEBUG):
+        assert _bewerter(lambda a: httpx.Response(404, text=MUSTER)).gelernt(daten) is None
+    assert MUSTER not in caplog.text and SCHLUESSEL not in caplog.text
+    assert _bewerter(handler, "").gelernt(daten) is None and len(gesehen) == 1

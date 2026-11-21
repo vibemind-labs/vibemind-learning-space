@@ -75,6 +75,10 @@ from .gruppe import (
 from .hintergrund import Spur
 from .katalog import KEIN_ZUGANG_MEHR, UEBERSICHT_WEG, Katalog, KeinZugang, UebersichtWeg
 from .kursabgabe import KursAbgabeStand, fall_fuer, unlesbar_text
+from .gelernt import als_eintrag as gelernt_eintrag
+from .gelernt import aus_antwort as gelernt_aus_antwort
+from .gelernt import fingerabdruck as gelernt_fingerabdruck
+from .gelernt import gelerntdaten, hat_stoff
 from .kursrueckmeldung import aus_antwort, aus_zahlen, als_text, rueckmeldungsdaten
 from ..services.evaluation.code_tests import TestErgebnis, Testfall, tests_laufen
 from .laeufer import ERLAUBNISSE as LAEUFER_ERLAUBNISSE
@@ -95,7 +99,7 @@ from .tafel import aufgabentext, falltext, leistentext
 from .uebergabe import ACTOR_MUSTER
 from .vorlage import VORLAGEN
 from .zusammenfassung import (
-    BILD_BUDGET_S, KI_AKTIONEN, NICHT_BEARBEITET_RUECKMELDUNG, AufgabeZeile, Kursrueckmeldung, Zusammenfassung,
+    BILD_BUDGET_S, KI_AKTIONEN, NICHT_BEARBEITET_RUECKMELDUNG, AufgabeZeile, Gelernt, Kursrueckmeldung, Zusammenfassung,
     als_markdown, als_pdf, begriffe_zusammenfassen, ergebnis_von, kernaussage, kurs_kurz, nicht_bearbeitet,
 )
 
@@ -762,6 +766,11 @@ class Bruecke:
         self._erklaer_datei = None if kursende is None else kursende.parent / "erklaerungen.json"
         self._erklaer_sperre = threading.Lock()
         self._erklaerungen = self._erklaerungen_lesen_datei()
+        # „Das haben Sie gelernt“ der Flaechen-KI je Sitzung (`{sid: {stand, kernpunkte, sitzt, wiederholen,
+        # offen}}`), neben kursende.json. `stand` kennzeichnet die Eingabe: derselbe Stand fragt nicht erneut.
+        self._gelernt_datei = None if kursende is None else kursende.parent / "gelernt.json"
+        self._gelernt_sperre = threading.Lock()
+        self._gelernt = self._gelernt_lesen_datei()
         self._ablauf = asyncio.Lock()
         # PenEchoMcp ist nicht fuer parallele Aufrufe gebaut: jeder Flaechenaufruf (Handler wie Spur) laeuft
         # unter dieser Sperre. Reentrant, weil ein Handler verschachtelte Flaechenhelfer ruft.
@@ -1161,6 +1170,69 @@ class Bruecke:
             if isinstance(titel, str) and isinstance(text, str) and (titel.strip() or text.strip()):
                 zeilen.append((titel.strip(), text.strip()))
         return tuple(zeilen)
+
+    # ---- „Das haben Sie gelernt“ ---------------------------------------------------
+    def _gelernt_lesen_datei(self) -> dict[str, dict[str, Any]]:
+        """`gelernt.json` als `{sid: Eintrag}`; fehlend oder kaputt = leer, ein unbrauchbarer Eintrag faellt weg."""
+        if self._gelernt_datei is None:
+            return {}
+        try:
+            wert = json.loads(self._gelernt_datei.read_text(encoding="utf-8"))
+            items = list(wert.items())
+        except (OSError, ValueError, AttributeError):
+            return {}
+        return {sid: e for sid, e in items
+                if isinstance(sid, str) and isinstance(e, dict) and isinstance(e.get("stand"), str)
+                and gelernt_aus_antwort(e) is not None}
+
+    def _gelernt_merken(self, sid: str, eintrag: dict[str, Any]) -> None:
+        """Antwort der Flaechen-KI samt Stand merken, atomar gespeichert; ein Schreibfehler haelt das PDF nie auf."""
+        with self._gelernt_sperre:
+            self._gelernt[sid] = eintrag
+            if self._gelernt_datei is None:
+                return
+            ziel = self._gelernt_datei
+            tmp: str | None = None
+            try:
+                ziel.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=ziel.parent, suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(self._gelernt, f, ensure_ascii=False)
+                os.replace(tmp, ziel)
+            except OSError as fehler:
+                log.warning("Gelernt nicht gespeichert: %s", _typ(fehler))
+                if tmp is not None:
+                    Path(tmp).unlink(missing_ok=True)
+
+    def _gelernt_fuer(self, sitzung: _Sitzung, z: Zusammenfassung) -> Gelernt | None:
+        """Die Seite „Das haben Sie gelernt“ zur Zusammenfassung `z`, oder None (dann fehlt die Seite).
+
+        Aus dem Speicher, solange der Stand derselbe ist (Aufgaben, Ergebnisse, Fragen, Notizen, Begriffe);
+        sonst fragt sie die Flaechen-KI (`KiBewerter.gelernt`, bis zu deren Zeitlimit) und merkt die Antwort.
+        Ohne bearbeitete Aufgabe wird nicht gefragt. Kein Bewerter, keine oder eine unbrauchbare Antwort, eine
+        Ausnahme: None, nichts gespeichert, der naechste Abruf fragt erneut. Laeuft ohne `_ablauf` und ohne
+        Flaechensperre (nur aus `_r_zusammenfassung`)."""
+        daten = gelerntdaten(z.kurs, z.aufgaben, z.begriffe, z.notizen)
+        if not hat_stoff(daten):
+            return None
+        stand = gelernt_fingerabdruck(daten)
+        with self._gelernt_sperre:
+            eintrag = self._gelernt.get(sitzung.sid)
+        if eintrag is not None and eintrag.get("stand") == stand:
+            return gelernt_aus_antwort(eintrag)
+        bewerter = self._bewerter
+        if bewerter is None or not bewerter.aktiv:
+            return None
+        try:
+            g = gelernt_aus_antwort(bewerter.gelernt(daten))
+        except Exception as fehler:  # noqa: BLE001 - ohne KI gibt es das PDF ohne diese Seite
+            log.warning("Gelernt der Flaechen-KI nicht verfuegbar: %s", _typ(fehler))
+            return None
+        if g is None:
+            log.info("Zusammenfassung ohne die Seite Gelernt (keine brauchbare Antwort)")
+            return None
+        self._gelernt_merken(sitzung.sid, gelernt_eintrag(g, stand))
+        return g
 
     # ---- Ein Canvas je Aufgabe: Kursrueckmeldung ---------------------------------
     def _kursrueckmeldungen_lesen(self) -> dict[str, Kursrueckmeldung]:
@@ -2269,6 +2341,7 @@ class Bruecke:
             if sitzung.vorn is not None:
                 self._ganzbild_aufnehmen(sitzung, sitzung.vorn)  # sichtbar und der neueste Stand
             z = self._zusammenfassung_bauen(sitzung, bilder=True)
+            z = replace(z, gelernt=self._gelernt_fuer(sitzung, z))
             pdf.append((als_pdf(z), f"zusammenfassung-{kurs_kurz(z.kurs)}-{z.datum:%Y-%m-%d}.pdf"))
             self._zusammenfassung_ablegen(sitzung, z)
             return {}

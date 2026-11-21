@@ -88,6 +88,39 @@ class Kursrueckmeldung:
 
 
 @dataclass(frozen=True)
+class Gelernt:
+    """„Das haben Sie gelernt“ (Flaechen-KI, `gelernt.py`): kurze Saetze je Liste; nur `kernpunkte` ist nie leer."""
+
+    kernpunkte: tuple[str, ...]
+    sitzt: tuple[str, ...] = ()
+    wiederholen: tuple[str, ...] = ()
+    offen: tuple[str, ...] = ()
+
+    def abschnitte(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """(Ueberschrift, Saetze) der nicht leeren Listen nach den Kernpunkten."""
+        return tuple((titel, liste) for titel, liste in (
+            ("Das sitzt", self.sitzt), ("Das lohnt sich noch einmal", self.wiederholen), ("Noch vor Ihnen", self.offen),
+        ) if liste)
+
+
+def status_von(a: AufgabeZeile) -> str:
+    """„richtig“ | „teilweise“ | „falsch“ | „leer“ (gebucht ohne Abgabe) | „arbeit“ (begonnen, noch nichts
+    abgegeben) | „offen“."""
+    if a.ergebnis == NICHT_BEARBEITET:
+        return "leer"
+    if a.urteil in ("richtig", "teilweise", "falsch"):
+        return a.urteil
+    k = _einzeilig(a.kernaussage)
+    if a.richtig or k.startswith("Richtig"):
+        return "richtig"
+    if k.startswith("Teilweise"):
+        return "teilweise"
+    if not k or k == "–":
+        return "arbeit" if a.begonnen else "offen"
+    return "falsch"
+
+
+@dataclass(frozen=True)
 class Zusammenfassung:
     kurs: str
     datum: date
@@ -95,6 +128,7 @@ class Zusammenfassung:
     begriffe: tuple[tuple[str, str], ...]
     rueckmeldung: Kursrueckmeldung | None = None
     notizen: tuple[tuple[str, str], ...] = ()  # (Auswahl oder Titel, Erklaerung) der Notizen zum Kurs
+    gelernt: Gelernt | None = None
 
     def abschnitte(self) -> tuple[tuple[str, str], ...]:
         """(Unterueberschrift, Text) der Kursrueckmeldung; ohne Rueckmeldung leer."""
@@ -370,6 +404,10 @@ def als_markdown(z: Zusammenfassung) -> str:
         zeilen.append("## Kursrückmeldung")
         for titel, text in z.abschnitte():
             zeilen += [f"### {titel}", _einzeilig(text), ""]
+    if z.gelernt is not None:
+        zeilen += ["## Das haben Sie gelernt", *(f"- {_einzeilig(p)}" for p in z.gelernt.kernpunkte), ""]
+        for titel, liste in z.gelernt.abschnitte():
+            zeilen += [f"### {titel}", *(f"- {_einzeilig(p)}" for p in liste), ""]
     for a in z.aufgaben:
         zeilen += [
             f"## Aufgabe {a.nummer}",

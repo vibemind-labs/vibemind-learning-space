@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 PFAD = "/api/lernflaeche/bewerten"
 KURS_PFAD = "/api/lernflaeche/kursrueckmeldung"
+GELERNT_PFAD = "/api/lernflaeche/gelernt"
 KOPF = "X-Lernflaeche-Bewertung"
 TIMEOUT_S = 120.0
 GRADER = "ki_flaeche"
@@ -69,23 +70,31 @@ class KiBewerter:
         Das JSON bei 200 mit `grader == "ki_flaeche"`; sonst None (kein Schluessel, 404 bei einer alten Lernflaeche,
         400/403/502, Zeit, unlesbare Antwort). Geloggt werden nur Typen und Statuscodes.
         """
+        return self._daten_senden(KURS_PFAD, daten, "Kursrueckmeldung")
+
+    def gelernt(self, daten: dict[str, Any]) -> dict[str, Any] | None:
+        """„Das haben Sie gelernt“ der Flaechen-KI (`POST /api/lernflaeche/gelernt`, Eingabe aus `gelernt.py`):
+        wie `kursrueckmeldung`, also das JSON bei 200 mit `grader == "ki_flaeche"`, sonst None."""
+        return self._daten_senden(GELERNT_PFAD, daten, "Gelernt")
+
+    def _daten_senden(self, pfad: str, daten: dict[str, Any], name: str) -> dict[str, Any] | None:
         if not self.aktiv:
             return None
         try:
             # Wie `/bewerten`: die Lernflaeche liest `body.daten` (sonst 400 `invalid-body`).
-            antwort = self._client.post(self._url + KURS_PFAD, json={"daten": daten}, headers={KOPF: self._schluessel})
+            antwort = self._client.post(self._url + pfad, json={"daten": daten}, headers={KOPF: self._schluessel})
         except httpx.HTTPError as fehler:
-            log.warning("Kursrueckmeldung nicht erreichbar: %s", type(fehler).__name__)
+            log.warning("%s nicht erreichbar: %s", name, type(fehler).__name__)
             return None
         if antwort.status_code != 200:
-            log.warning("Kursrueckmeldung: HTTP %s", antwort.status_code)
+            log.warning("%s: HTTP %s", name, antwort.status_code)
             return None
         try:
             wert = antwort.json()
         except ValueError as fehler:
-            log.warning("Kursrueckmeldung ohne lesbare Antwort: %s", type(fehler).__name__)
+            log.warning("%s ohne lesbare Antwort: %s", name, type(fehler).__name__)
             return None
         if not isinstance(wert, dict) or wert.get("grader") != GRADER:
-            log.warning("Kursrueckmeldung unbrauchbar")
+            log.warning("%s unbrauchbar", name)
             return None
         return wert
