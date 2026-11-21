@@ -2743,3 +2743,36 @@ def test_flaeche_teile_ohne_massstab_oder_bei_fehler_bleibt_das_gesamtbild(zusta
                  KachelFake({**MASSSTAB, "mapping": {"origin": {"x": "a", "y": 0}, "pixelsPerLogicalUnit": {"x": 0, "y": 1}}})):
         ganz, teile = _client(zustand, fake).flaeche_teile("sess-1", timeout=3.0)
         assert ganz.endswith(b"G") and teile == ()  # nie halb: entweder alle Ausschnitte oder keiner
+
+
+def _uebersicht(breite: int, hoehe: int, bloecke: list[tuple[int, int, int, int]]) -> bytes:
+    import io
+
+    from PIL import Image
+
+    bild = Image.new("RGB", (breite, hoehe), "white")
+    for kasten in bloecke:
+        bild.paste((30, 30, 30), kasten)
+    puffer = io.BytesIO()
+    bild.save(puffer, format="PNG")
+    return puffer.getvalue()
+
+
+def test_kacheln_schneiden_im_leeren_zwischenraum_statt_durch_den_text() -> None:
+    # 21.11.: gleich breite Ausschnitte schnitten mitten durch eine Textspalte („1 → B: selbststän“).
+    from spaces.learning.huelle.penecho_mcp import kacheln
+
+    inhalt = {"x": 100, "y": 50, "w": 2000, "h": 1000}
+    # Uebersicht 1000 x 500 (halber Massstab): zwei Spalten Inhalt, dazwischen leer von 560 bis 640 Bildpunkten.
+    bild = _uebersicht(1000, 500, [(0, 0, 560, 500), (640, 0, 1000, 500)])
+    assert kacheln(inhalt, bild) == [{"x": 100, "y": 50, "w": 1200, "h": 1000}, {"x": 1300, "y": 50, "w": 800, "h": 1000}]
+    # Kein Zwischenraum in der Naehe der Mitte: es bleibt beim gleichmaessigen Schnitt.
+    voll = _uebersicht(1000, 500, [(0, 0, 1000, 500)])
+    assert kacheln(inhalt, voll) == kacheln(inhalt)
+    weit_weg = _uebersicht(1000, 500, [(0, 0, 50, 500), (120, 0, 1000, 500)])
+    assert kacheln(inhalt, weit_weg) == kacheln(inhalt)
+    assert kacheln(inhalt, b"kein bild") == kacheln(inhalt)
+    # Auch zwischen Zeilen: leer von 520 bis 600 Bildpunkten, der Schnitt liegt bei 560 statt 500.
+    hoch = {"x": 0, "y": 0, "w": 1000, "h": 2000}
+    zeilen = kacheln(hoch, _uebersicht(500, 1000, [(0, 0, 500, 520), (0, 600, 500, 1000)]))
+    assert [(k["y"], k["h"]) for k in zeilen] == [(0, 1120), (1120, 880)]

@@ -600,16 +600,68 @@ KACHEL_HOEHE = 1400
 KACHELN_HOECHSTENS = 6
 
 
-def kacheln(inhalt: Mapping[str, Any] | None) -> list[dict[str, int]]:
-    """Teilt das Rechteck des Inhalts `{x, y, w, h}` in gleich grosse Ausschnitte, Zeile fuer Zeile von links nach
-    rechts. Leer ohne Rechteck oder bei mehr als `KACHELN_HOECHSTENS` Ausschnitten."""
+SCHNITT_SPIEL = 0.5       # so weit (Anteil einer Kachel) darf ein Schnitt vom gleichmaessigen abweichen
+ZWISCHENRAUM_MIN = 0.012  # ein leerer Streifen zaehlt ab diesem Anteil der Kante der Uebersicht
+
+
+def _leere_streifen(uebersicht: bytes | None) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Leere Streifen der Uebersicht als Anteile (von, bis) ihrer Breite bzw. Hoehe: Spalten und Zeilen ganz ohne
+    dunkle Bildpunkte. Ohne lesbares Bild keine."""
+    if not uebersicht:
+        return [], []
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(uebersicht)) as bild:
+            hell = bild.convert("L").point(lambda wert: 255 if wert >= 200 else 0)
+            breite, hoehe = hell.size
+            spalten = [v == 255 for v in hell.resize((breite, 1), Image.Resampling.BOX).tobytes()]
+            zeilen = [v == 255 for v in hell.resize((1, hoehe), Image.Resampling.BOX).tobytes()]
+    except Exception:  # noqa: BLE001 - dann wird gleichmaessig geschnitten
+        return [], []
+
+    def laeufe(leer: list[bool]) -> list[tuple[float, float]]:
+        aus, start, n = [], None, len(leer)
+        for i, wert in enumerate([*leer, False]):
+            if wert and start is None:
+                start = i
+            elif not wert and start is not None:
+                if (i - start) / n >= ZWISCHENRAUM_MIN:
+                    aus.append((start / n, i / n))
+                start = None
+        return aus
+
+    return laeufe(spalten), laeufe(zeilen)
+
+
+def _schnitte(laenge: int, teile: int, streifen: Sequence[tuple[float, float]]) -> list[int]:
+    """Grenzen 0 … `laenge` fuer `teile` Stuecke: gleichmaessig, aber jede in die Mitte des naechstgelegenen leeren
+    Streifens gerueckt, wenn dessen Mitte hoechstens `SCHNITT_SPIEL` einer Stuecklaenge entfernt liegt."""
+    mitten = [(a + b) / 2 * laenge for a, b in streifen]
+    grenzen = [0]
+    for rest in range(teile, 1, -1):
+        # Nach jedem Schnitt wird der Rest neu gleichmaessig geteilt: ein verschobener Schnitt verschiebt die folgenden.
+        stueck = (laenge - grenzen[-1]) / rest
+        ideal = grenzen[-1] + stueck
+        nah = [m for m in mitten if abs(m - ideal) <= SCHNITT_SPIEL * stueck]
+        grenzen.append(round(min(nah, key=lambda m: abs(m - ideal))) if nah else -(-round(ideal * 1000) // 1000))
+    return [*grenzen, laenge]
+
+
+def kacheln(inhalt: Mapping[str, Any] | None, uebersicht: bytes | None = None) -> list[dict[str, int]]:
+    """Teilt das Rechteck des Inhalts `{x, y, w, h}` in Ausschnitte, Zeile fuer Zeile von links nach rechts. Mit
+    `uebersicht` (das Bild genau dieses Rechtecks) liegen die Schnitte in leeren Zwischenraeumen statt mitten im
+    Text; sonst gleichmaessig. Leer ohne Rechteck oder bei mehr als `KACHELN_HOECHSTENS` Ausschnitten."""
     if not inhalt or inhalt["w"] <= 0 or inhalt["h"] <= 0:
         return []
     spalten, zeilen = -(-inhalt["w"] // KACHEL_BREITE), -(-inhalt["h"] // KACHEL_HOEHE)
     if spalten * zeilen > KACHELN_HOECHSTENS:
         return []
-    b, h = -(-inhalt["w"] // spalten), -(-inhalt["h"] // zeilen)
-    return [{"x": inhalt["x"] + s * b, "y": inhalt["y"] + z * h, "w": b, "h": h}
+    leer_x, leer_y = _leere_streifen(uebersicht) if spalten * zeilen > 1 else ([], [])
+    xs, ys = _schnitte(inhalt["w"], spalten, leer_x), _schnitte(inhalt["h"], zeilen, leer_y)
+    return [{"x": inhalt["x"] + xs[s], "y": inhalt["y"] + ys[z], "w": xs[s + 1] - xs[s], "h": ys[z + 1] - ys[z]}
             for z in range(zeilen) for s in range(spalten)]
 
 
@@ -1890,7 +1942,7 @@ class PenEchoMcp:
         ganz = self._bild_aus(ergebnis)
         teile: list[bytes] = []
         try:
-            for kachel in kacheln(_inhalt_aus(self._struktur(ergebnis))):
+            for kachel in kacheln(_inhalt_aus(self._struktur(ergebnis)), ganz):
                 rest = ende - _jetzt()
                 if rest <= 0:
                     raise TimeoutError
