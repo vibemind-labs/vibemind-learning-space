@@ -67,8 +67,6 @@ class AufgabeZeile:
     rueckmeldung: str = ""              # die ganze Rueckmeldung, ungekuerzt (PDF); leer: `kernaussage` gilt
     begonnen: bool = False              # daran gearbeitet (KI auf der Flaeche, Frage an den Tutor), auch ohne Abgabe
     erklaerungen: tuple[tuple[str, str], ...] = ()  # (Frage, Antwort) von „Erklaer mir das“ zu dieser Aufgabe
-    flaeche: tuple[bytes, ...] = ()     # das ganze Canvas in lesbaren Ausschnitten (PNG); leer: `bild` gilt
-
     @property
     def versuche_zeile(self) -> str:
         """„Versuche: 3, zuerst falsch“ fuer Textfassung und PDF; bei hoechstens einem Versuch leer."""

@@ -665,6 +665,37 @@ def kacheln(inhalt: Mapping[str, Any] | None, uebersicht: bytes | None = None) -
             for z in range(zeilen) for s in range(spalten)]
 
 
+SCHARF_MAX_KANTE = 4800  # laengste Kante des zusammengesetzten Bildes in Bildpunkten
+
+
+def zusammensetzen(teile: Sequence[tuple[Mapping[str, int], bytes]]) -> bytes:
+    """Ein PNG aus Ausschnitten: jeder `(Rechteck {x, y, w, h}, Bild)` kommt an seinen Platz. Der gemeinsame
+    Massstab ist der kleinste der Ausschnitte (nie vergroessert), begrenzt auf `SCHARF_MAX_KANTE`. Ein unlesbares
+    Bild oder eine leere Liste: Ausnahme (der Aufrufer bleibt dann beim Gesamtbild)."""
+    import io
+
+    from PIL import Image
+
+    bilder = []
+    for kachel, roh in teile:
+        with Image.open(io.BytesIO(roh)) as bild:
+            bilder.append((kachel, bild.convert("RGB")))
+    x0, y0 = min(k["x"] for k, _ in bilder), min(k["y"] for k, _ in bilder)
+    breite = max(k["x"] + k["w"] for k, _ in bilder) - x0
+    hoehe = max(k["y"] + k["h"] for k, _ in bilder) - y0
+    massstab = min(min(b.width / k["w"], b.height / k["h"]) for k, b in bilder)
+    massstab = min(massstab, SCHARF_MAX_KANTE / max(breite, hoehe))
+    ganz = Image.new("RGB", (max(1, round(breite * massstab)), max(1, round(hoehe * massstab))), "white")
+    for kachel, bild in bilder:
+        links, oben = round((kachel["x"] - x0) * massstab), round((kachel["y"] - y0) * massstab)
+        rechts, unten = (round((kachel["x"] + kachel["w"] - x0) * massstab),
+                         round((kachel["y"] + kachel["h"] - y0) * massstab))
+        ganz.paste(bild.resize((max(1, rechts - links), max(1, unten - oben)), Image.Resampling.LANCZOS), (links, oben))
+    puffer = io.BytesIO()
+    ganz.save(puffer, format="PNG", optimize=True)
+    return puffer.getvalue()
+
+
 def _inhalt_aus(struktur: Mapping[str, Any]) -> dict[str, int] | None:
     """Rechteck des aufgenommenen Inhalts in Canvas-Einheiten aus den Angaben einer Aufnahme: Bildgroesse
     (`width`, `height`) und `mapping` (`origin`, `pixelsPerLogicalUnit`). Fehlt oder stimmt etwas nicht: None."""
@@ -1929,28 +1960,29 @@ class PenEchoMcp:
         Zusammenfassung: die Aufnahme einer Abgabe zeigt nur das Rechteck der Aufgabe oder ihr Ergebnisfeld."""
         return self._aufnahme(session_id, None, timeout)
 
-    def flaeche_teile(self, session_id: str, *, timeout: float = 4.0) -> tuple[bytes, tuple[bytes, ...]]:
-        """(Gesamtbild, Ausschnitte): das ganze Canvas als ein Bild (wie `ganze_flaeche`) und dazu dieselbe Flaeche
-        in lesbaren Ausschnitten der Stufe „detail“, Zeile fuer Zeile (`kacheln`).
+    def flaeche_scharf(self, session_id: str, *, timeout: float = 6.0) -> tuple[bytes, bytes | None]:
+        """(Gesamtbild, scharfes Bild): das ganze Canvas als ein Bild (wie `ganze_flaeche`) und dasselbe noch
+        einmal scharf (PNG), zusammengesetzt aus Ausschnitten der Stufe „detail“ (`kacheln`, `zusammensetzen`).
 
-        Anlass 21.11.: das Gesamtbild einer breiten Flaeche (lange Kante 1024) war im PDF nicht zu lesen. Wo der
-        Inhalt liegt, sagt die Aufnahme selbst: Bildgroesse und `mapping` (Ursprung, Bildpunkte je Einheit;
-        bound-operations.js `browserMetadata`). Ohne diese Angaben, bei zu vielen Ausschnitten, einem Fehler oder
-        aufgebrauchter Zeit (`timeout` gilt fuer alles zusammen) sind die Ausschnitte leer: nie nur ein Teil."""
+        Anlass 21.11.: das Gesamtbild einer breiten Flaeche (lange Kante 1024) war nicht zu lesen, einzelne
+        Ausschnitte sahen zerhackt aus. Wo der Inhalt liegt, sagt die Aufnahme selbst: Bildgroesse und `mapping`
+        (Ursprung, Bildpunkte je Einheit; bound-operations.js `browserMetadata`). Ohne diese Angaben, bei zu
+        vielen Ausschnitten, einem Fehler oder aufgebrauchter Zeit (`timeout` gilt fuer alles zusammen) gibt es
+        kein scharfes Bild (None): nie ein halbes."""
         ende = _jetzt() + timeout
         ergebnis = self._aufnahme_roh(session_id, None, timeout)
         ganz = self._bild_aus(ergebnis)
-        teile: list[bytes] = []
         try:
+            teile: list[tuple[dict[str, int], bytes]] = []
             for kachel in kacheln(_inhalt_aus(self._struktur(ergebnis)), ganz):
                 rest = ende - _jetzt()
                 if rest <= 0:
                     raise TimeoutError
-                teile.append(self._aufnahme(session_id, kachel, rest))
+                teile.append((kachel, self._aufnahme(session_id, kachel, rest)))
+            return ganz, zusammensetzen(teile) if teile else None
         except Exception as fehler:  # noqa: BLE001 - dann zeigt die Zusammenfassung das Gesamtbild
-            log.warning("Ausschnitte des Canvas nicht aufgenommen: %s", _typ(fehler))
-            return ganz, ()
-        return ganz, tuple(teile)
+            log.warning("Scharfes Bild des Canvas nicht aufgenommen: %s", _typ(fehler))
+            return ganz, None
 
     def _aufnahme(self, session_id: str, region: dict[str, int] | None, timeout: float | None = None) -> bytes:
         # schema.js:666 penecho_capture_canvas: target "region" verlangt region {x,y,w,h}; ohne `region` das Ziel

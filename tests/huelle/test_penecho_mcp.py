@@ -2727,23 +2727,74 @@ def test_kacheln_teilt_breite_flaechen_in_lesbare_ausschnitte() -> None:
     assert kacheln({"x": 0, "y": 0, "w": 0, "h": 10}) == []
 
 
-def test_flaeche_teile_nimmt_gesamtbild_und_ausschnitte_auf(zustand: Path) -> None:
-    fake = KachelFake(MASSSTAB)
-    ganz, teile = _client(zustand, fake).flaeche_teile("sess-1", timeout=3.0)
-    assert ganz.endswith(b"G") and [t[-1:] for t in teile] == [b"1", b"2"]
+def _kachelbild(breite: int, hoehe: int, farbe: str) -> bytes:
+    import io
+
+    from PIL import Image
+
+    puffer = io.BytesIO()
+    Image.new("RGB", (breite, hoehe), farbe).save(puffer, format="PNG")
+    return puffer.getvalue()
+
+
+class ScharfFake(KachelFake):
+    """Wie KachelFake, aber die Ausschnitte sind echte Bilder (1,2 Bildpunkte je Einheit): links rot, rechts blau."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        arg = body.get("params", {}).get("arguments", {})
+        if body.get("method") != "tools/call" or body["params"]["name"] != "penecho_capture_canvas" or arg["target"] != "region":
+            return super().__call__(request)
+        self.anfragen.append((body, request.headers))
+        self.ausschnitte += 1
+        if self.kaputt_ab is not None and self.ausschnitte > self.kaputt_ab:
+            sc = {"code": "CAPTURE_TOO_LARGE", "message": "m"}
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {
+                "isError": True, "structuredContent": sc, "content": []}})
+        r = arg["region"]
+        png = _kachelbild(round(r["w"] * 1.2), round(r["h"] * 1.2), "red" if self.ausschnitte == 1 else "blue")
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {
+            "content": [{"type": "image", "data": base64.b64encode(png).decode(), "mimeType": "image/png"}]}})
+
+
+def test_flaeche_scharf_setzt_die_ausschnitte_zu_einem_bild_zusammen(zustand: Path) -> None:
+    # 21.11.: einzelne Ausschnitte im PDF sahen zerhackt aus; es soll ein Bild sein, nur schaerfer.
+    import io
+
+    from PIL import Image
+
+    fake = ScharfFake(MASSSTAB)
+    ganz, scharf = _client(zustand, fake).flaeche_scharf("sess-1", timeout=3.0)
+    assert ganz.endswith(b"G") and scharf is not None
     args = [a["arguments"] for a in fake.aufrufe("penecho_capture_canvas")]
     assert args[0] == {"sessionId": "sess-1", "target": "canvas", "quality": "basic"}
     assert args[1:] == [
         {"sessionId": "sess-1", "target": "region", "region": {"x": 100, "y": 50, "w": 1000, "h": 1000}, "quality": "detail"},
         {"sessionId": "sess-1", "target": "region", "region": {"x": 1100, "y": 50, "w": 1000, "h": 1000}, "quality": "detail"}]
+    bild = Image.open(io.BytesIO(scharf)).convert("RGB")
+    assert bild.size == (2400, 1200)  # der ganze Inhalt (2000 x 1000 Einheiten) im Massstab der Ausschnitte
+    assert bild.getpixel((600, 600)) == (255, 0, 0) and bild.getpixel((1800, 600)) == (0, 0, 255)
+    assert bild.getpixel((1199, 10)) == (255, 0, 0) and bild.getpixel((1200, 10)) == (0, 0, 255)  # nahtlos
 
 
-def test_flaeche_teile_ohne_massstab_oder_bei_fehler_bleibt_das_gesamtbild(zustand: Path) -> None:
-    for fake in (KachelFake(None), KachelFake({"width": 1000, "height": 500}), KachelFake(MASSSTAB, kaputt_ab=1),
-                 KachelFake({**MASSSTAB, "mapping": {"origin": {"x": "a", "y": 0}, "pixelsPerLogicalUnit": {"x": 0, "y": 1}}})):
-        ganz, teile = _client(zustand, fake).flaeche_teile("sess-1", timeout=3.0)
-        assert ganz.endswith(b"G") and teile == ()  # nie halb: entweder alle Ausschnitte oder keiner
+def test_flaeche_scharf_ohne_massstab_oder_bei_fehler_bleibt_das_gesamtbild(zustand: Path) -> None:
+    for fake in (ScharfFake(None), ScharfFake({"width": 1000, "height": 500}), ScharfFake(MASSSTAB, kaputt_ab=1),
+                 KachelFake(MASSSTAB),  # Ausschnitte, die keine Bilder sind
+                 ScharfFake({**MASSSTAB, "mapping": {"origin": {"x": "a", "y": 0}, "pixelsPerLogicalUnit": {"x": 0, "y": 1}}})):
+        ganz, scharf = _client(zustand, fake).flaeche_scharf("sess-1", timeout=3.0)
+        assert ganz.endswith(b"G") and scharf is None  # nie halb: entweder das ganze scharfe Bild oder keines
 
+
+def test_zusammensetzen_begrenzt_die_groesse() -> None:
+    import io
+
+    from PIL import Image
+
+    from spaces.learning.huelle.penecho_mcp import SCHARF_MAX_KANTE, zusammensetzen
+
+    kachel = {"x": 0, "y": 0, "w": 4000, "h": 1000}
+    bild = Image.open(io.BytesIO(zusammensetzen([(kachel, _kachelbild(8000, 2000, "green"))])))
+    assert bild.size == (SCHARF_MAX_KANTE, SCHARF_MAX_KANTE // 4)
 
 def _uebersicht(breite: int, hoehe: int, bloecke: list[tuple[int, int, int, int]]) -> bytes:
     import io

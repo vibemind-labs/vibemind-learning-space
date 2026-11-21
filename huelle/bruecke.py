@@ -191,7 +191,7 @@ KI_NUMMER_MAX = 500
 _KI_AUSLOESER = frozenset({"manuell", "auto"})
 MAX_FRAGE = 500
 # Aufnahme des ganzen Canvas beim Verlassen einer Aufgabe: laenger wartet der Aufgabenwechsel nie darauf.
-GANZBILD_ZEITLIMIT_S = 4.0
+GANZBILD_ZEITLIMIT_S = 6.0
 # „Erklaer mir das“ je Aufgabe aufbewahrt: so viele Wechsel, jede Seite hoechstens so lang.
 ERKLAERUNGEN_MAX = 12
 ERKLAERUNG_ZEICHEN = 4000
@@ -705,21 +705,6 @@ def _als_png(bild: bytes) -> bytes:
     return ziel.getvalue()
 
 
-def _leeres_bild(png: bytes) -> bool:
-    """Zeigt das Bild nur leere Flaeche? Weniger als zwei Promille dunkle Bildpunkte (Schrift, Striche, Bilder
-    sind deutlich dunkler als das Papier). Ein unlesbares Bild gilt nicht als leer."""
-    from PIL import Image
-
-    try:
-        with Image.open(io.BytesIO(png)) as bild:
-            grau = bild.convert("L")
-            verteilung = grau.histogram()
-            dunkel = sum(verteilung[:200])
-            return dunkel < 0.002 * (grau.width * grau.height)
-    except Exception:  # noqa: BLE001
-        return False
-
-
 class Bruecke:
     def __init__(
         self,
@@ -1115,48 +1100,48 @@ class Bruecke:
                 board = sitzung.aufgaben_boards.get(nummer)
                 if board is None:
                     return
-                roh, teile = self._penecho.flaeche_teile(board, timeout=GANZBILD_ZEITLIMIT_S)
+                roh, scharf = self._penecho.flaeche_scharf(board, timeout=GANZBILD_ZEITLIMIT_S)
             self._aufnahme_merken(sitzung.sid, nummer, _als_png(roh), ganz=True)
-            self._teile_merken(sitzung.sid, nummer, teile)
+            self._scharf_merken(sitzung.sid, nummer, scharf)
         except Exception as fehler:  # noqa: BLE001 - ein Bild darf weder Wechsel noch Zusammenfassung aufhalten
             log.warning("Ganzes Canvas von Aufgabe %d nicht aufgenommen: %s", nummer, _typ(fehler))
 
-    def _teile_pfade(self, sid: str, nummer: int) -> list[Path]:
-        """Die abgelegten Ausschnitte des Canvas der Aufgabe (`<nummer>-teil-<i>.png`) in ihrer Reihenfolge."""
+    def _scharf_pfad(self, sid: str, nummer: int) -> Path | None:
+        """`<nummer>-scharf.png` neben dem Gesamtbild: das ganze Canvas, zusammengesetzt aus scharfen Ausschnitten."""
         ganz = self._aufnahme_pfad(sid, nummer, ganz=True)
-        if ganz is None:
-            return []
-        gefunden = []
-        for pfad in ganz.parent.glob(f"{int(nummer)}-teil-*.png"):
-            lauf = pfad.stem.rsplit("-", 1)[-1]
-            if lauf.isdigit():
-                gefunden.append((int(lauf), pfad))
-        return [pfad for _, pfad in sorted(gefunden)]
+        return None if ganz is None else ganz.with_name(f"{int(nummer)}-scharf.png")
 
-    def _teile_merken(self, sid: str, nummer: int, teile: Sequence[bytes]) -> None:
-        """Ersetzt die Ausschnitte der Aufgabe durch `teile`; solche, die nur leere Flaeche zeigen, fallen weg.
-        Ohne `teile` sind danach keine mehr da: alte zeigten sonst einen ueberholten Stand."""
-        ganz = self._aufnahme_pfad(sid, nummer, ganz=True)
-        if ganz is None:
+    def _scharf_merken(self, sid: str, nummer: int, png: bytes | None) -> None:
+        """Legt das scharfe Bild ab; ohne eines (None) ist danach keines mehr da: ein altes zeigte sonst einen
+        ueberholten Stand. Raeumt dabei die einzelnen Ausschnitte von frueher (`<nummer>-teil-<i>.png`) weg."""
+        ziel = self._scharf_pfad(sid, nummer)
+        if ziel is None:
             return
+        tmp: str | None = None
         try:
-            for alt in self._teile_pfade(sid, nummer):
+            for alt in ziel.parent.glob(f"{int(nummer)}-teil-*.png"):
                 alt.unlink(missing_ok=True)
-            lauf = 0
-            for roh in teile:
-                png = _als_png(roh)
-                if _leeres_bild(png):
-                    continue
-                lauf += 1
-                (ganz.parent / f"{int(nummer)}-teil-{lauf}.png").write_bytes(png)
-        except Exception as fehler:  # noqa: BLE001 - dann zeigt die Zusammenfassung das Gesamtbild
-            log.warning("Ausschnitte von Aufgabe %d nicht abgelegt: %s", nummer, _typ(fehler))
+            if png is None:
+                ziel.unlink(missing_ok=True)
+                return
+            fd, tmp = tempfile.mkstemp(dir=ziel.parent, suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(png)
+            os.replace(tmp, ziel)
+        except OSError as fehler:
+            log.warning("Scharfes Bild von Aufgabe %d nicht abgelegt: %s", nummer, _typ(fehler))
+            if tmp is not None:
+                Path(tmp).unlink(missing_ok=True)
 
-    def _teile_lesen(self, sid: str, nummer: int) -> tuple[bytes, ...]:
-        try:
-            return tuple(pfad.read_bytes() for pfad in self._teile_pfade(sid, nummer))
-        except OSError:
-            return ()
+    def _flaechenbild(self, sid: str, nummer: int) -> bytes | None:
+        """Das beste Bild des Canvas der Aufgabe: das scharfe, sonst das Gesamtbild, sonst die Aufnahme der Abgabe."""
+        scharf = self._scharf_pfad(sid, nummer)
+        if scharf is not None:
+            try:
+                return scharf.read_bytes()
+            except OSError:
+                pass
+        return self._aufnahme_lesen(sid, nummer, ganz=True) or self._aufnahme_lesen(sid, nummer)
 
     # ---- „Erklaer mir das“ je Aufgabe aufbewahren --------------------------------
     def _erklaerungen_lesen_datei(self) -> dict[str, dict[str, list[list[str]]]]:
@@ -2263,8 +2248,7 @@ class Bruecke:
         if sitzung.je_aufgabe:
             # Das ganze Canvas geht vor; die Aufnahme der Abgabe bleibt fuer Aufgaben ohne ein solches Bild.
             aufnahmen: list[bytes | None] = [
-                (self._aufnahme_lesen(sitzung.sid, e["nummer"], ganz=True)
-                 or self._aufnahme_lesen(sitzung.sid, e["nummer"])) if bilder else None
+                self._flaechenbild(sitzung.sid, e["nummer"]) if bilder else None
                 for e in eintraege]
             rueckmeldung = self._kursrueckmeldung_lesen(sitzung.sid)
         else:
@@ -2293,7 +2277,6 @@ class Bruecke:
                 ki_schritte, richtig,
                 versuche=_versuche_von(e), erstes_urteil=_erstes_urteil_von(e), urteil=wort or _urteil_wort(vor),
                 rueckmeldung=ganz, begonnen=bool(ki_schritte or erklaerungen), erklaerungen=erklaerungen,
-                flaeche=self._teile_lesen(sitzung.sid, e["nummer"]) if bilder and sitzung.je_aufgabe else (),
             ))
         if sitzung.je_aufgabe and rueckmeldung is None and turn.get("state") == "completed":
             rueckmeldung = aus_zahlen(zeilen)

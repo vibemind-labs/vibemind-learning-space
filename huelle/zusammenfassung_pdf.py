@@ -50,7 +50,6 @@ RAND = 18 * mm
 # Der Rahmen von ReportLab hat innen je 6 Punkt Luft; Tabellen in genau dieser Breite stehen buendig zum Text.
 BREITE = A4[0] - 2 * RAND - 12
 BILD_MAX_HOEHE = 105 * mm  # das ganze Canvas einer Aufgabe: Erklaerungen und Skizzen sollen lesbar bleiben
-AUSSCHNITT_MAX_HOEHE = 170 * mm  # ein lesbarer Ausschnitt des Canvas darf fast eine Seite fuellen
 # Ein Bildpunkt der Aufnahme wird hoechstens so gross: ein kleiner Ausschnitt (eine Zeile Schrift) fuellte
 # sonst die halbe Seite in Riesenschrift.
 PUNKT_JE_PIXEL = 0.42
@@ -198,19 +197,12 @@ def _gerahmt(bild: Image, breite: float) -> Table:
 
 
 def _flaeche(a: AufgabeZeile, breite: float) -> list[Any]:
-    """Bausteine „IHRE FLÄCHE“: die lesbaren Ausschnitte des Canvas, jeder ein eigener Baustein (so bricht die
-    Karte zwischen ihnen um); ohne Ausschnitte das eine Bild (ganzes Canvas oder Aufnahme der Abgabe)."""
-    bilder = [b for b in (_bild(png, breite, hoehe=AUSSCHNITT_MAX_HOEHE) for png in a.flaeche) if b is not None]
-    if not bilder:
-        eins = _bild(a.bild, breite)
-        if eins is None:
-            return []
-        return _feld("IHRE FLÄCHE", [Spacer(1, 1 * mm), _gerahmt(eins, breite)])
-    teile: list[Any] = [Paragraph("IHRE FLÄCHE" + (f" ({len(bilder)} Ausschnitte)" if len(bilder) > 1 else ""), MARKE),
-                        Spacer(1, 1 * mm)]
-    for bild in bilder:
-        teile += [_gerahmt(bild, breite), Spacer(1, 2.6 * mm)]
-    return teile
+    """Baustein „IHRE FLÄCHE“: das Bild des Canvas (scharf zusammengesetzt, sonst das Gesamtbild oder die Aufnahme
+    der Abgabe) in voller Breite. Es ist scharf genug, um im PDF-Programm hineinzuzoomen."""
+    eins = _bild(a.bild, breite)
+    if eins is None:
+        return []
+    return _feld("IHRE FLÄCHE", [Spacer(1, 1 * mm), _gerahmt(eins, breite)])
 
 
 def _kachel(zahl: int, wort: str, farbe: Any, flaeche: Any, breite: float) -> Table:

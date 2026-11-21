@@ -483,14 +483,10 @@ def test_markdown_traegt_fragen_und_notizen() -> None:
     assert zeilen[i + 1] == "- Begriff: Erklärung."
     assert "## Notizen" not in als_markdown(Zusammenfassung("Kurs", date(2026, 11, 21), (a,), ()))
 
-def test_gesetztes_pdf_zeigt_die_flaeche_in_ausschnitten_statt_als_ein_kleines_bild() -> None:
-    # 21.11.: das Gesamtbild einer breiten Flaeche war im PDF nicht zu lesen.
-    teile = (_png_gross(1440, 1300), _png_gross(1440, 1300), _png_gross(1440, 1300))
-    a = AufgabeZeile(1, "Zeichnen Sie.", "siehe Bild", "Richtig.", _png_gross(1024, 400), flaeche=teile)
+def test_gesetztes_pdf_zeigt_ein_grosses_scharfes_bild_in_voller_breite() -> None:
+    # Das zusammengesetzte Bild des Canvas (bis 4800 Bildpunkte breit) steht als EIN Bild in der Karte.
+    a = AufgabeZeile(1, "Zeichnen Sie.", "siehe Bild", "Richtig.", _png_gross(3600, 1500))
     pdf = als_pdf(Zusammenfassung("Kurs", date(2026, 11, 21), (a,), ()))
-    seiten = pypdf.PdfReader(io.BytesIO(pdf)).pages
-    assert sum(len(list(s.images)) for s in seiten) == 3  # die Ausschnitte, nicht zusaetzlich das Gesamtbild
-    assert len(seiten) >= 2  # jeder Ausschnitt gross genug zum Lesen: sie verteilen sich ueber Seiten
-    ohne = replace(a, flaeche=())
-    assert sum(len(list(s.images)) for s in pypdf.PdfReader(io.BytesIO(als_pdf(
-        Zusammenfassung("Kurs", date(2026, 11, 21), (ohne,), ())))).pages) == 1
+    assert sum(len(list(s.images)) for s in pypdf.PdfReader(io.BytesIO(pdf)).pages) == 1
+    bild = gesetzt._bild(a.bild, gesetzt.BREITE - 10 * gesetzt.mm)
+    assert bild is not None and abs(bild.drawWidth - (gesetzt.BREITE - 10 * gesetzt.mm)) < 0.5

@@ -1881,40 +1881,32 @@ def test_zusammenfassung_fragt_nicht_ohne_bearbeitete_aufgabe(tmp_path: Path) ->
         client.app.beenden()
 
 
-# ---- Das ganze Canvas in lesbaren Ausschnitten ------------------------------------------------------------------
-def _png_muster() -> bytes:
-    """Ein Ausschnitt mit Inhalt: weiss mit einem dunklen Block."""
-    import io
-
-    from PIL import Image
-
-    bild = Image.new("RGB", (40, 40), "white")
-    bild.paste((20, 20, 20), (5, 5, 25, 25))
-    puffer = io.BytesIO()
-    bild.save(puffer, format="PNG")
-    return puffer.getvalue()
+# ---- Das ganze Canvas scharf ------------------------------------------------------------------------------------
+def _scharf(tmp_path: Path, nummer: int) -> Path:
+    return tmp_path / "aufnahmen" / SID / f"{nummer}-scharf.png"
 
 
-def _teile(tmp_path: Path, nummer: int) -> list[str]:
-    return sorted(p.name for p in (tmp_path / "aufnahmen" / SID).glob(f"{nummer}-teil-*.png"))
-
-
-def test_verlassen_legt_lesbare_ausschnitte_ab_und_laesst_leere_weg(tmp_path: Path) -> None:
+def test_verlassen_legt_das_scharfe_bild_ab_und_die_zusammenfassung_zeigt_es(tmp_path: Path) -> None:
     client, penecho, _ = _oeffnen(_neu_lern(3), tmp_path)
     bruecke = client.app
     try:
-        penecho.teile = (_png_muster(), _png_farbe("white"), _png_muster())  # der mittlere zeigt nur leere Flaeche
+        penecho.ganzbild, penecho.scharf = _png_farbe("red"), _png_farbe("green")
+        ordner = tmp_path / "aufnahmen" / SID
+        ordner.mkdir(parents=True, exist_ok=True)
+        (ordner / "1-teil-1.png").write_bytes(PNG)  # Altbestand der einzelnen Ausschnitte (21.11.)
         assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 2}).status_code == 200
-        assert _teile(tmp_path, 1) == ["1-teil-1.png", "1-teil-2.png"] and _ganzbild(tmp_path, 1).exists()
+        assert _scharf(tmp_path, 1).read_bytes() == _png_farbe("green") and _ganzbild(tmp_path, 1).exists()
+        assert not (ordner / "1-teil-1.png").exists()
         z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=True)
-        assert z.aufgaben[0].flaeche == (_png_muster(), _png_muster()) and z.aufgaben[1].flaeche == ()
-        assert bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=False).aufgaben[0].flaeche == ()
-        # Eine spaetere Aufnahme ohne Ausschnitte (Fehler, alte Lernflaeche) raeumt die alten weg: sie zeigten
-        # sonst einen ueberholten Stand neben dem neuen Gesamtbild.
+        assert z.aufgaben[0].bild == _png_farbe("green")  # das scharfe geht vor dem Gesamtbild
+        assert penecho.ganz_timeouts == [bruecke_modul.GANZBILD_ZEITLIMIT_S]
+        # Eine spaetere Aufnahme ohne scharfes Bild (Fehler, alte Lernflaeche) raeumt das alte weg: es zeigte sonst
+        # einen ueberholten Stand. Dann gilt das Gesamtbild.
         assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 1}).status_code == 200
-        penecho.teile = ()
+        penecho.scharf = None
         assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 2}).status_code == 200
-        assert _teile(tmp_path, 1) == [] and _ganzbild(tmp_path, 1).exists()
-        assert _teile(tmp_path, 2) == ["2-teil-1.png", "2-teil-2.png"]
+        assert not _scharf(tmp_path, 1).exists() and _scharf(tmp_path, 2).exists()
+        z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=True)
+        assert z.aufgaben[0].bild == _png_farbe("red") and z.aufgaben[1].bild == _png_farbe("green")
     finally:
         bruecke.beenden()
