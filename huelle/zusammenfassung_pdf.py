@@ -32,7 +32,7 @@ from reportlab.platypus import (
 )
 
 from .zusammenfassung import (
-    AufgabeZeile, Zusammenfassung, _einzeilig, ki_genutzt, ohne_latex, status_von,
+    AufgabeZeile, Zusammenfassung, _einzeilig, erster_satz, ki_genutzt, ohne_latex, rueckmeldung_teile, status_von,
 )
 
 # Farben der Huelle (huelle.css), damit Seite und PDF zusammengehoeren.
@@ -105,25 +105,6 @@ ZAHL_TEXT = _stil("zahltext", fontSize=8.5, leading=11, alignment=TA_CENTER, tex
 def _x(text: object) -> str:
     """Klartext fuer einen ReportLab-Absatz: Formeln umgeschrieben, einzeilig, XML-Zeichen maskiert."""
     return escape(_einzeilig(ohne_latex(str(text))))
-
-
-def erster_satz(text: str) -> str:
-    """Der erste Satz einer Aufgabenstellung, fuer die Tabelle: ein ganzer Satz, nie mitten im Wort abgeschnitten."""
-    t = _einzeilig(ohne_latex(text))
-    teile = re.split(r"(?<=[.!?:])\s", t, maxsplit=1)
-    return teile[0] if teile and teile[0] else t
-
-
-def rueckmeldung_teile(kernaussage: str) -> tuple[str, list[str]]:
-    """(Einleitung, Punkte) der Rueckmeldung. Die Karte reiht ihre Kriterien mit „ – “ aneinander; im PDF
-    stehen sie als Liste. Ohne solche Punkte ist alles Einleitung."""
-    k = _einzeilig(ohne_latex(kernaussage))
-    if not k or k == "–":
-        return "", []
-    teile = [t.strip() for t in re.split(r"\s–\s(?=[A-ZÄÖÜ„])", k) if t.strip()]
-    if len(teile) < 3:
-        return k, []
-    return teile[0], teile[1:]
 
 
 class _Pille(Flowable):

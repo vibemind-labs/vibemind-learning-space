@@ -98,6 +98,7 @@ from .sperre import Sperre
 from .tafel import aufgabentext, falltext, leistentext
 from .uebergabe import ACTOR_MUSTER
 from .vorlage import VORLAGEN
+from .zusammenfassung_html import als_html
 from .zusammenfassung import (
     BILD_BUDGET_S, KI_AKTIONEN, NICHT_BEARBEITET_RUECKMELDUNG, AufgabeZeile, Gelernt, Kursrueckmeldung, Zusammenfassung,
     als_markdown, als_pdf, begriffe_zusammenfassen, ergebnis_von, kernaussage, kurs_kurz, nicht_bearbeitet,
@@ -192,6 +193,12 @@ _KI_AUSLOESER = frozenset({"manuell", "auto"})
 MAX_FRAGE = 500
 # Aufnahme des ganzen Canvas beim Verlassen einer Aufgabe: laenger wartet der Aufgabenwechsel nie darauf.
 GANZBILD_ZEITLIMIT_S = 6.0
+NICHT_GEFUNDEN = "Nicht gefunden."
+# Das scharfe Bild des Canvas hat etwa 1,3 Bildpunkte je Canvas-Einheit; so breit steht es in der Seite.
+SCHARF_ANZEIGE = 0.75
+# Die Seite der Zusammenfassung: kein Skript, nichts Fremdes; Styles stehen in der Seite, Bilder kommen von hier.
+SEITE_ZUSAMMENFASSUNG_CSP = ("default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; "
+                             "form-action 'none'; frame-ancestors 'none'")
 # „Erklaer mir das“ je Aufgabe aufbewahrt: so viele Wechsel, jede Seite hoechstens so lang.
 ERKLAERUNGEN_MAX = 12
 ERKLAERUNG_ZEICHEN = 4000
@@ -824,6 +831,8 @@ class Bruecke:
             Route(f"{p}/sitzungen/{{sid}}/passt", self._r_passt, methods=["POST"]),
             Route(f"{p}/sitzungen/{{sid}}/stand", self._r_stand, methods=["GET"]),
             Route(f"{p}/sitzungen/{{sid}}/zusammenfassung.pdf", self._r_zusammenfassung, methods=["GET"]),
+            Route(f"{p}/sitzungen/{{sid}}/zusammenfassung", self._r_zusammenfassung_seite, methods=["GET"]),
+            Route(f"{p}/sitzungen/{{sid}}/flaeche/{{nummer}}", self._r_flaechenbild, methods=["GET"]),
             Route(f"{p}/sitzungen/{{sid}}/zeigen", self._r_zeigen, methods=["POST"]),
             Route(f"{p}/sitzungen/{{sid}}/erklaeren", self._r_erklaeren, methods=["POST"]),
             Route(f"{p}/sitzungen/{{sid}}/hinweis", self._r_hinweis, methods=["POST"]),
@@ -2368,19 +2377,86 @@ class Bruecke:
         except Exception as fehler:  # noqa: BLE001 - Kursende und PDF duerfen daran nie scheitern
             log.warning("Zusammenfassung nicht abgelegt: %s", _typ(fehler))
 
+    def _zusammenfassung_fertig(self, sitzung: _Sitzung) -> Zusammenfassung:
+        """Die Zusammenfassung fuer PDF und Seite: das Canvas vorn frisch aufgenommen (es ist sichtbar und sein
+        Stand der neueste), mit Bildern und der Seite „Das haben Sie gelernt“; die Textfassung wird abgelegt."""
+        if sitzung.vorn is not None:
+            self._ganzbild_aufnehmen(sitzung, sitzung.vorn)
+        z = self._zusammenfassung_bauen(sitzung, bilder=True)
+        z = replace(z, gelernt=self._gelernt_fuer(sitzung, z))
+        self._zusammenfassung_ablegen(sitzung, z)
+        return z
+
+    def _anzeigebreite(self, sid: str, nummer: int, png: bytes) -> int | None:
+        """Breite des Bildes der Flaeche in der Seite (CSS-Pixel): das scharfe Bild etwa in der Groesse des Canvas
+        (`SCHARF_ANZEIGE` seiner Bildpunkte, so bleibt es auch auf dichten Bildschirmen scharf), jedes andere in
+        seiner eigenen. Unlesbar: None."""
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(png)) as bild:
+                breite = bild.width
+        except Exception:  # noqa: BLE001 - dann steht die Karte ohne Bild da
+            return None
+        scharf = self._scharf_pfad(sid, nummer)
+        return max(1, round(breite * SCHARF_ANZEIGE)) if scharf is not None and scharf.is_file() else breite
+
+    async def _r_zusammenfassung_seite(self, request: Request) -> Response:
+        """Die Zusammenfassung als Seite im Browser (`zusammenfassung_html.py`): ohne Skript, Bilder nur von hier."""
+        sid = request.path_params["sid"]
+        actor = request.state.actor_id
+        seite: list[str] = []
+
+        def arbeit() -> dict[str, Any]:
+            sitzung = self._listensitzung(actor, sid)
+            z = self._zusammenfassung_fertig(sitzung)
+            bilder = {}
+            for a in z.aufgaben:
+                breite = self._anzeigebreite(sitzung.sid, a.nummer, a.bild) if a.bild else None
+                if breite is not None:
+                    bilder[a.nummer] = (f"flaeche/{int(a.nummer)}", breite)
+            seite.append(als_html(z, pdf_adresse="zusammenfassung.pdf", bilder=bilder))
+            return {}
+
+        antwort = await self._ausfuehren(arbeit, ablauf=False)
+        if antwort.status_code != 200 or not seite:
+            return antwort
+        return Response(seite[0], media_type="text/html", headers={
+            "Content-Security-Policy": SEITE_ZUSAMMENFASSUNG_CSP, "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin",
+        })
+
+    async def _r_flaechenbild(self, request: Request) -> Response:
+        """Das Bild der Flaeche einer Aufgabe fuer die Seite: das scharfe, sonst Gesamtbild oder Abgabe; sonst 404."""
+        sid = request.path_params["sid"]
+        nummer_roh = request.path_params["nummer"]
+        actor = request.state.actor_id
+        bild: list[bytes] = []
+
+        def arbeit() -> dict[str, Any]:
+            sitzung = self._listensitzung(actor, sid)
+            if not (isinstance(nummer_roh, str) and nummer_roh.isdigit() and 1 <= int(nummer_roh) <= 999):
+                raise _Antwort(404, {"meldung": NICHT_GEFUNDEN})
+            png = self._flaechenbild(sitzung.sid, int(nummer_roh))
+            if png is None:
+                raise _Antwort(404, {"meldung": NICHT_GEFUNDEN})
+            bild.append(png)
+            return {}
+
+        antwort = await self._ausfuehren(arbeit, ablauf=False)
+        if antwort.status_code != 200 or not bild:
+            return antwort
+        return Response(bild[0], media_type="image/png", headers={
+            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
     async def _r_zusammenfassung(self, request: Request) -> Response:
         sid = request.path_params["sid"]
         actor = request.state.actor_id
         pdf: list[tuple[bytes, str]] = []
 
         def arbeit() -> dict[str, Any]:
-            sitzung = self._listensitzung(actor, sid)
-            if sitzung.vorn is not None:
-                self._ganzbild_aufnehmen(sitzung, sitzung.vorn)  # sichtbar und der neueste Stand
-            z = self._zusammenfassung_bauen(sitzung, bilder=True)
-            z = replace(z, gelernt=self._gelernt_fuer(sitzung, z))
+            z = self._zusammenfassung_fertig(self._listensitzung(actor, sid))
             pdf.append((als_pdf(z), f"zusammenfassung-{kurs_kurz(z.kurs)}-{z.datum:%Y-%m-%d}.pdf"))
-            self._zusammenfassung_ablegen(sitzung, z)
             return {}
 
         antwort = await self._ausfuehren(arbeit, ablauf=False)

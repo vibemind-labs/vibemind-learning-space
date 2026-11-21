@@ -29,7 +29,7 @@ export function listenErgebnisAus(a, verworfen) {
   return ergebnis;
 }
 
-/** Der Link „Zusammenfassung (PDF)“ gilt jedem Listenkurs, auch einem beendeten, den die Seite neu öffnet. */
+/** Der Link „Zusammenfassung“ gilt jedem Listenkurs, auch einem beendeten, den die Seite neu öffnet. */
 export function zusammenfassungSessionId(liste, listeEnde, turn) {
   if (liste === null && !listeEnde) return null;
   const sid = turn?.session_id;

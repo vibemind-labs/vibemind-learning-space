@@ -271,8 +271,11 @@ def test_seitenleiste_haelt_katex_hilfstext_drinnen() -> None:
 def test_zusammenfassung_link_nur_im_listenmodus() -> None:
     html = (SEITE / "index.html").read_text(encoding="utf-8")
     js = (SEITE / "huelle.js").read_text(encoding="utf-8")
-    assert 'id="zusammenfassung"' in html and "Zusammenfassung (PDF)" in html
-    assert "zusammenfassung.pdf" in js and "zusammenfassungSessionId(z.liste, z.listeEnde, z.turn)" in js
+    # 21.11.: der Knopf oeffnet die Ansicht im Browser (neuer Tab, das Canvas zum Verschieben); das PDF gibt es dort.
+    assert '<a id="zusammenfassung" class="zusammenfassung" href="#" target="_blank" rel="noopener" hidden>Zusammenfassung</a>' in html
+    assert "Zusammenfassung (PDF)" not in html
+    assert "/zusammenfassung`" in js and "zusammenfassung.pdf" not in js
+    assert "zusammenfassungSessionId(z.liste, z.listeEnde, z.turn)" in js
 
 
 def test_kurs_abgeben_macht_aeltere_staende_vor_dem_post_ungueltig() -> None:

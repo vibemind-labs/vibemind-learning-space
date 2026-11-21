@@ -1910,3 +1910,46 @@ def test_verlassen_legt_das_scharfe_bild_ab_und_die_zusammenfassung_zeigt_es(tmp
         assert z.aufgaben[0].bild == _png_farbe("red") and z.aufgaben[1].bild == _png_farbe("green")
     finally:
         bruecke.beenden()
+
+# ---- Die Zusammenfassung als Seite im Browser -------------------------------------------------------------------
+def _png_weiss(breite: int, hoehe: int) -> bytes:
+    import io
+
+    from PIL import Image
+
+    puffer = io.BytesIO()
+    Image.new("RGB", (breite, hoehe), "white").save(puffer, format="PNG")
+    return puffer.getvalue()
+
+
+def test_zusammenfassung_als_seite_mit_dem_canvas_zum_verschieben(tmp_path: Path) -> None:
+    client, penecho, _ = _oeffnen(_neu_lern(3), tmp_path)
+    bruecke = client.app
+    basis = f"/lernen/api/sitzungen/{SID}"
+    try:
+        penecho.scharf = _png_weiss(3000, 1200)
+        bruecke._ki_schritt_merken(SID, 1, "solve")  # Aufgabe 1 ist begonnen: sie bekommt eine Karte
+        bruecke._ki_schritt_merken(SID, 2, "solve")
+        assert client.post(f"{basis}/zeigen", json={"nummer": 2}).status_code == 200  # nimmt Aufgabe 1 auf
+        penecho.scharf = None  # Aufgabe 2 (vorn) bekommt beim Abruf nur das Gesamtbild
+        penecho.ganzbild = _png_weiss(1024, 400)
+        r = client.get(f"{basis}/zusammenfassung")
+        assert r.status_code == 200 and r.headers["content-type"] == "text/html; charset=utf-8"
+        richtlinie = r.headers["content-security-policy"]
+        assert "default-src 'none'" in richtlinie and "img-src 'self'" in richtlinie and "script-src" not in richtlinie
+        assert r.headers["cache-control"] == "no-store" and r.headers["x-content-type-options"] == "nosniff"
+        seite = r.text
+        assert "Ihre bearbeiteten Aufgaben" in seite and 'href="zusammenfassung.pdf"' in seite
+        # Das scharfe Bild steht etwa in der Groesse des Canvas da (drei Viertel seiner Bildpunkte), das Gesamtbild
+        # in seiner eigenen; die Adressen fuehren auf die Bildroute derselben Sitzung.
+        assert '<img src="flaeche/1" width="2250"' in seite and '<img src="flaeche/2" width="1024"' in seite
+        bild = client.get(f"{basis}/flaeche/1")
+        assert bild.status_code == 200 and bild.headers["content-type"] == "image/png"
+        assert bild.content == _png_weiss(3000, 1200) and bild.headers["cache-control"] == "no-store"
+        assert client.get(f"{basis}/flaeche/2").content == _png_weiss(1024, 400)
+        assert client.get(f"{basis}/flaeche/3").status_code == 404  # nie geoeffnet: kein Bild
+        assert client.get(f"{basis}/flaeche/abc").status_code == 404
+        assert client.get("/lernen/api/sitzungen/nicht-uuid/zusammenfassung").status_code == 404
+        assert client.get("/lernen/api/sitzungen/nicht-uuid/flaeche/1").status_code == 404
+    finally:
+        bruecke.beenden()

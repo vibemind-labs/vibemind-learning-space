@@ -321,11 +321,11 @@ function abfragePlanen() {
 }
 
 function zusammenfassungZeigen() {
-  // Nur im Listenmodus (auch am Kursende): Link auf die PDF-Route der Brücke.
+  // Nur im Listenmodus (auch am Kursende): Link auf die Ansicht der Brücke (neuer Tab); das PDF gibt es dort.
   const sid = zusammenfassungSessionId(z.liste, z.listeEnde, z.turn);
   const link = $("zusammenfassung");
   link.hidden = sid === null;
-  if (!link.hidden) link.href = `${API}/sitzungen/${encodeURIComponent(sid)}/zusammenfassung.pdf`;
+  if (!link.hidden) link.href = `${API}/sitzungen/${encodeURIComponent(sid)}/zusammenfassung`;
 }
 
 function listenkopfZeigen() {
