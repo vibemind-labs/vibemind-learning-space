@@ -2675,4 +2675,6 @@ def test_ganze_flaeche_nimmt_alles_auf_dem_canvas_auf(zustand: Path) -> None:
     daten = _client(zustand, fake).ganze_flaeche("sess-1", timeout=3.0)
     assert daten.startswith(b"\x89PNG")
     arg = fake.aufrufe("penecho_capture_canvas")[0]["arguments"]
-    assert arg == {"sessionId": "sess-1", "target": "canvas", "quality": "detail"}
+    # Die Lernflaeche erlaubt „detail“ nur fuer einen Ausschnitt oder ein Widget; fuer das Ziel „canvas“ meldete sie
+    # an der echten Flaeche DETAIL_TARGET_REQUIRED (canvas-agent-runtime.js canvasAgentCapture), also „basic“.
+    assert arg == {"sessionId": "sess-1", "target": "canvas", "quality": "basic"}

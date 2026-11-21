@@ -1834,12 +1834,11 @@ class PenEchoMcp:
         # schema.js:666 penecho_capture_canvas: target "region" verlangt region {x,y,w,h}; ohne `region` das Ziel
         # "canvas". Das Bild kommt als content-Eintrag type "image" (base64 in data), protocol.js:28-37.
         grenze = {} if timeout is None else {"timeout": timeout}
-        ziel: dict[str, Any] = {"target": "canvas"} if region is None else {"target": "region", "region": region}
-        ergebnis = self._werkzeug("penecho_capture_canvas", {
-            "sessionId": session_id,
-            **ziel,
-            "quality": "detail",
-        }, **grenze)
+        # „detail“ gibt es nur fuer einen Ausschnitt oder ein Widget (canvas-agent-runtime.js canvasAgentCapture,
+        # sonst DETAIL_TARGET_REQUIRED); das ganze Canvas kommt deshalb in der Stufe „basic“ (lange Kante 1024).
+        ziel: dict[str, Any] = ({"target": "canvas", "quality": "basic"} if region is None
+                                else {"target": "region", "region": region, "quality": "detail"})
+        ergebnis = self._werkzeug("penecho_capture_canvas", {"sessionId": session_id, **ziel}, **grenze)
         for teil in ergebnis.get("content") or []:
             if isinstance(teil, dict) and teil.get("type") == "image" and isinstance(teil.get("data"), str):
                 try:
