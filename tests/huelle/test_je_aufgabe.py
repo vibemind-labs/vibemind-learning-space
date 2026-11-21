@@ -1879,3 +1879,42 @@ def test_zusammenfassung_fragt_nicht_ohne_bearbeitete_aufgabe(tmp_path: Path) ->
         assert "Das haben Sie gelernt" not in text and not hasattr(bewerter, "gelernt_daten")
     finally:
         client.app.beenden()
+
+
+# ---- Das ganze Canvas in lesbaren Ausschnitten ------------------------------------------------------------------
+def _png_muster() -> bytes:
+    """Ein Ausschnitt mit Inhalt: weiss mit einem dunklen Block."""
+    import io
+
+    from PIL import Image
+
+    bild = Image.new("RGB", (40, 40), "white")
+    bild.paste((20, 20, 20), (5, 5, 25, 25))
+    puffer = io.BytesIO()
+    bild.save(puffer, format="PNG")
+    return puffer.getvalue()
+
+
+def _teile(tmp_path: Path, nummer: int) -> list[str]:
+    return sorted(p.name for p in (tmp_path / "aufnahmen" / SID).glob(f"{nummer}-teil-*.png"))
+
+
+def test_verlassen_legt_lesbare_ausschnitte_ab_und_laesst_leere_weg(tmp_path: Path) -> None:
+    client, penecho, _ = _oeffnen(_neu_lern(3), tmp_path)
+    bruecke = client.app
+    try:
+        penecho.teile = (_png_muster(), _png_farbe("white"), _png_muster())  # der mittlere zeigt nur leere Flaeche
+        assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 2}).status_code == 200
+        assert _teile(tmp_path, 1) == ["1-teil-1.png", "1-teil-2.png"] and _ganzbild(tmp_path, 1).exists()
+        z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=True)
+        assert z.aufgaben[0].flaeche == (_png_muster(), _png_muster()) and z.aufgaben[1].flaeche == ()
+        assert bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=False).aufgaben[0].flaeche == ()
+        # Eine spaetere Aufnahme ohne Ausschnitte (Fehler, alte Lernflaeche) raeumt die alten weg: sie zeigten
+        # sonst einen ueberholten Stand neben dem neuen Gesamtbild.
+        assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 1}).status_code == 200
+        penecho.teile = ()
+        assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 2}).status_code == 200
+        assert _teile(tmp_path, 1) == [] and _ganzbild(tmp_path, 1).exists()
+        assert _teile(tmp_path, 2) == ["2-teil-1.png", "2-teil-2.png"]
+    finally:
+        bruecke.beenden()

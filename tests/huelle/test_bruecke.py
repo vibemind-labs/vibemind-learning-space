@@ -159,6 +159,12 @@ class FakePenEcho:
             raise self.ganz_fehler
         return self.ganzbild if self.ganzbild is not None else self.bild
 
+    teile: tuple[bytes, ...] = ()  # lesbare Ausschnitte des ganzen Canvas
+
+    def flaeche_teile(self, session_id: str, *, timeout: float = 4.0) -> tuple[bytes, tuple[bytes, ...]]:
+        """Gesamtbild wie `ganze_flaeche` (gleicher Eintrag in `aufrufe`), dazu die Ausschnitte."""
+        return self.ganze_flaeche(session_id, timeout=timeout), self.teile
+
     def sitzungen_von(self, wurzel: str) -> dict[str, str]:
         return {k: v for k, v in self.gemerkte_sitzungen.items() if k.startswith(f"{wurzel}#")}
 

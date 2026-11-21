@@ -50,6 +50,7 @@ RAND = 18 * mm
 # Der Rahmen von ReportLab hat innen je 6 Punkt Luft; Tabellen in genau dieser Breite stehen buendig zum Text.
 BREITE = A4[0] - 2 * RAND - 12
 BILD_MAX_HOEHE = 105 * mm  # das ganze Canvas einer Aufgabe: Erklaerungen und Skizzen sollen lesbar bleiben
+AUSSCHNITT_MAX_HOEHE = 170 * mm  # ein lesbarer Ausschnitt des Canvas darf fast eine Seite fuellen
 # Ein Bildpunkt der Aufnahme wird hoechstens so gross: ein kleiner Ausschnitt (eine Zeile Schrift) fuellte
 # sonst die halbe Seite in Riesenschrift.
 PUNKT_JE_PIXEL = 0.42
@@ -174,7 +175,7 @@ class _Balken(Flowable):
         c.restoreState()
 
 
-def _bild(png: bytes | None, breite: float) -> Image | None:
+def _bild(png: bytes | None, breite: float, *, hoehe: float = BILD_MAX_HOEHE) -> Image | None:
     """Die Aufnahme des Canvas in ruhiger Groesse; ein unlesbares Bild faellt weg (die Karte bleibt)."""
     if not png:
         return None
@@ -184,8 +185,32 @@ def _bild(png: bytes | None, breite: float) -> Image | None:
         return None
     if b <= 0 or h <= 0:
         return None
-    faktor = min(breite / b, BILD_MAX_HOEHE / h, PUNKT_JE_PIXEL)
+    faktor = min(breite / b, hoehe / h, PUNKT_JE_PIXEL)
     return Image(io.BytesIO(png), width=b * faktor, height=h * faktor)
+
+
+def _gerahmt(bild: Image, breite: float) -> Table:
+    rahmen = Table([[bild]], colWidths=[breite])
+    rahmen.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.4, LINIE), ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                                ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 4),
+                                ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
+    return rahmen
+
+
+def _flaeche(a: AufgabeZeile, breite: float) -> list[Any]:
+    """Bausteine „IHRE FLÄCHE“: die lesbaren Ausschnitte des Canvas, jeder ein eigener Baustein (so bricht die
+    Karte zwischen ihnen um); ohne Ausschnitte das eine Bild (ganzes Canvas oder Aufnahme der Abgabe)."""
+    bilder = [b for b in (_bild(png, breite, hoehe=AUSSCHNITT_MAX_HOEHE) for png in a.flaeche) if b is not None]
+    if not bilder:
+        eins = _bild(a.bild, breite)
+        if eins is None:
+            return []
+        return _feld("IHRE FLÄCHE", [Spacer(1, 1 * mm), _gerahmt(eins, breite)])
+    teile: list[Any] = [Paragraph("IHRE FLÄCHE" + (f" ({len(bilder)} Ausschnitte)" if len(bilder) > 1 else ""), MARKE),
+                        Spacer(1, 1 * mm)]
+    for bild in bilder:
+        teile += [_gerahmt(bild, breite), Spacer(1, 2.6 * mm)]
+    return teile
 
 
 def _kachel(zahl: int, wort: str, farbe: Any, flaeche: Any, breite: float) -> Table:
@@ -302,13 +327,7 @@ def _karte(a: AufgabeZeile) -> Any:
         for p in punkte:
             liste += _absaetze(p, punkt=True)
         inhalt += _feld("RÜCKMELDUNG", liste)
-    bild = _bild(a.bild, innen)
-    if bild is not None:
-        rahmen = Table([[bild]], colWidths=[innen])
-        rahmen.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.4, LINIE), ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                                    ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 4),
-                                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
-        inhalt += _feld("IHRE FLÄCHE", [Spacer(1, 1 * mm), rahmen])
+    inhalt += _flaeche(a, innen)
     if a.erklaerungen:
         fragen: list[Any] = []
         for frage, antwort in a.erklaerungen:

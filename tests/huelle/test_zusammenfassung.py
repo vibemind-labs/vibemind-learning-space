@@ -482,3 +482,15 @@ def test_markdown_traegt_fragen_und_notizen() -> None:
     i = zeilen.index("## Notizen")
     assert zeilen[i + 1] == "- Begriff: Erklärung."
     assert "## Notizen" not in als_markdown(Zusammenfassung("Kurs", date(2026, 11, 21), (a,), ()))
+
+def test_gesetztes_pdf_zeigt_die_flaeche_in_ausschnitten_statt_als_ein_kleines_bild() -> None:
+    # 21.11.: das Gesamtbild einer breiten Flaeche war im PDF nicht zu lesen.
+    teile = (_png_gross(1440, 1300), _png_gross(1440, 1300), _png_gross(1440, 1300))
+    a = AufgabeZeile(1, "Zeichnen Sie.", "siehe Bild", "Richtig.", _png_gross(1024, 400), flaeche=teile)
+    pdf = als_pdf(Zusammenfassung("Kurs", date(2026, 11, 21), (a,), ()))
+    seiten = pypdf.PdfReader(io.BytesIO(pdf)).pages
+    assert sum(len(list(s.images)) for s in seiten) == 3  # die Ausschnitte, nicht zusaetzlich das Gesamtbild
+    assert len(seiten) >= 2  # jeder Ausschnitt gross genug zum Lesen: sie verteilen sich ueber Seiten
+    ohne = replace(a, flaeche=())
+    assert sum(len(list(s.images)) for s in pypdf.PdfReader(io.BytesIO(als_pdf(
+        Zusammenfassung("Kurs", date(2026, 11, 21), (ohne,), ())))).pages) == 1

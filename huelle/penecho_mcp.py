@@ -593,6 +593,53 @@ def _typ(fehler: BaseException) -> str:
     return type(fehler).__name__
 
 
+# Ein Ausschnitt des Canvas fuer die Zusammenfassung: hoechstens so gross (in Canvas-Einheiten), damit die Stufe
+# „detail“ (lange Kante 1440 Bildpunkte) ihn mindestens etwa 1:1 abbildet und Schrift im PDF lesbar bleibt.
+KACHEL_BREITE = 1100
+KACHEL_HOEHE = 1400
+KACHELN_HOECHSTENS = 6
+
+
+def kacheln(inhalt: Mapping[str, Any] | None) -> list[dict[str, int]]:
+    """Teilt das Rechteck des Inhalts `{x, y, w, h}` in gleich grosse Ausschnitte, Zeile fuer Zeile von links nach
+    rechts. Leer ohne Rechteck oder bei mehr als `KACHELN_HOECHSTENS` Ausschnitten."""
+    if not inhalt or inhalt["w"] <= 0 or inhalt["h"] <= 0:
+        return []
+    spalten, zeilen = -(-inhalt["w"] // KACHEL_BREITE), -(-inhalt["h"] // KACHEL_HOEHE)
+    if spalten * zeilen > KACHELN_HOECHSTENS:
+        return []
+    b, h = -(-inhalt["w"] // spalten), -(-inhalt["h"] // zeilen)
+    return [{"x": inhalt["x"] + s * b, "y": inhalt["y"] + z * h, "w": b, "h": h}
+            for z in range(zeilen) for s in range(spalten)]
+
+
+def _inhalt_aus(struktur: Mapping[str, Any]) -> dict[str, int] | None:
+    """Rechteck des aufgenommenen Inhalts in Canvas-Einheiten aus den Angaben einer Aufnahme: Bildgroesse
+    (`width`, `height`) und `mapping` (`origin`, `pixelsPerLogicalUnit`). Fehlt oder stimmt etwas nicht: None."""
+    def zahl(wert: object) -> float | None:
+        return float(wert) if isinstance(wert, (int, float)) and not isinstance(wert, bool) else None
+
+    mapping = struktur.get("mapping")
+    if not isinstance(mapping, Mapping):
+        return None
+    ursprung, dichte = mapping.get("origin"), mapping.get("pixelsPerLogicalUnit")
+    if not isinstance(ursprung, Mapping) or not isinstance(dichte, Mapping):
+        return None
+    werte = [zahl(struktur.get("width")), zahl(struktur.get("height")), zahl(ursprung.get("x")), zahl(ursprung.get("y")),
+             zahl(dichte.get("x")), zahl(dichte.get("y"))]
+    if any(w is None for w in werte):
+        return None
+    breite, hoehe, x, y, dx, dy = werte  # type: ignore[misc]
+    if min(breite, hoehe, dx, dy) <= 0 or min(x, y) < 0:
+        return None
+    # Nach innen gerundet: ein Ausschnitt darf nie ueber den Rand des Canvas hinausragen (INVALID_REGION).
+    links, oben = int(x) + (x > int(x)), int(y) + (y > int(y))
+    rechts, unten = int(x + breite / dx), int(y + hoehe / dy)
+    if rechts <= links or unten <= oben:
+        return None
+    return {"x": links, "y": oben, "w": rechts - links, "h": unten - oben}
+
+
 def _datenurl(daten: bytes) -> str | None:
     """Data-URL fuer penecho_place_image (PNG/JPEG/WebP); anderes Format None."""
     if daten.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -1830,15 +1877,44 @@ class PenEchoMcp:
         Zusammenfassung: die Aufnahme einer Abgabe zeigt nur das Rechteck der Aufgabe oder ihr Ergebnisfeld."""
         return self._aufnahme(session_id, None, timeout)
 
+    def flaeche_teile(self, session_id: str, *, timeout: float = 4.0) -> tuple[bytes, tuple[bytes, ...]]:
+        """(Gesamtbild, Ausschnitte): das ganze Canvas als ein Bild (wie `ganze_flaeche`) und dazu dieselbe Flaeche
+        in lesbaren Ausschnitten der Stufe „detail“, Zeile fuer Zeile (`kacheln`).
+
+        Anlass 21.11.: das Gesamtbild einer breiten Flaeche (lange Kante 1024) war im PDF nicht zu lesen. Wo der
+        Inhalt liegt, sagt die Aufnahme selbst: Bildgroesse und `mapping` (Ursprung, Bildpunkte je Einheit;
+        bound-operations.js `browserMetadata`). Ohne diese Angaben, bei zu vielen Ausschnitten, einem Fehler oder
+        aufgebrauchter Zeit (`timeout` gilt fuer alles zusammen) sind die Ausschnitte leer: nie nur ein Teil."""
+        ende = _jetzt() + timeout
+        ergebnis = self._aufnahme_roh(session_id, None, timeout)
+        ganz = self._bild_aus(ergebnis)
+        teile: list[bytes] = []
+        try:
+            for kachel in kacheln(_inhalt_aus(self._struktur(ergebnis))):
+                rest = ende - _jetzt()
+                if rest <= 0:
+                    raise TimeoutError
+                teile.append(self._aufnahme(session_id, kachel, rest))
+        except Exception as fehler:  # noqa: BLE001 - dann zeigt die Zusammenfassung das Gesamtbild
+            log.warning("Ausschnitte des Canvas nicht aufgenommen: %s", _typ(fehler))
+            return ganz, ()
+        return ganz, tuple(teile)
+
     def _aufnahme(self, session_id: str, region: dict[str, int] | None, timeout: float | None = None) -> bytes:
         # schema.js:666 penecho_capture_canvas: target "region" verlangt region {x,y,w,h}; ohne `region` das Ziel
         # "canvas". Das Bild kommt als content-Eintrag type "image" (base64 in data), protocol.js:28-37.
-        grenze = {} if timeout is None else {"timeout": timeout}
         # „detail“ gibt es nur fuer einen Ausschnitt oder ein Widget (canvas-agent-runtime.js canvasAgentCapture,
         # sonst DETAIL_TARGET_REQUIRED); das ganze Canvas kommt deshalb in der Stufe „basic“ (lange Kante 1024).
+        return self._bild_aus(self._aufnahme_roh(session_id, region, timeout))
+
+    def _aufnahme_roh(self, session_id: str, region: dict[str, int] | None, timeout: float | None) -> dict[str, Any]:
+        grenze = {} if timeout is None else {"timeout": timeout}
         ziel: dict[str, Any] = ({"target": "canvas", "quality": "basic"} if region is None
                                 else {"target": "region", "region": region, "quality": "detail"})
-        ergebnis = self._werkzeug("penecho_capture_canvas", {"sessionId": session_id, **ziel}, **grenze)
+        return self._werkzeug("penecho_capture_canvas", {"sessionId": session_id, **ziel}, **grenze)
+
+    @staticmethod
+    def _bild_aus(ergebnis: dict[str, Any]) -> bytes:
         for teil in ergebnis.get("content") or []:
             if isinstance(teil, dict) and teil.get("type") == "image" and isinstance(teil.get("data"), str):
                 try:

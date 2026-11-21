@@ -2678,3 +2678,68 @@ def test_ganze_flaeche_nimmt_alles_auf_dem_canvas_auf(zustand: Path) -> None:
     # Die Lernflaeche erlaubt „detail“ nur fuer einen Ausschnitt oder ein Widget; fuer das Ziel „canvas“ meldete sie
     # an der echten Flaeche DETAIL_TARGET_REQUIRED (canvas-agent-runtime.js canvasAgentCapture), also „basic“.
     assert arg == {"sessionId": "sess-1", "target": "canvas", "quality": "basic"}
+
+# ---- Das ganze Canvas in lesbaren Ausschnitten (21.11.: ein einziges Bild der breiten Flaeche war zu klein) -----
+class KachelFake(Fake):
+    """Aufnahme mit Massstab: das Ziel „canvas“ meldet Bildgroesse und `mapping`; `kaputt_ab`: so viele
+    Ausschnitte gelingen, der naechste scheitert."""
+
+    def __init__(self, struktur: dict | None, kaputt_ab: int | None = None) -> None:
+        super().__init__()
+        self.struktur, self.kaputt_ab, self.ausschnitte = struktur, kaputt_ab, 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("method") != "tools/call" or body["params"]["name"] != "penecho_capture_canvas":
+            return super().__call__(request)
+        self.anfragen.append((body, request.headers))
+        arg = body["params"]["arguments"]
+        if arg["target"] == "region":
+            self.ausschnitte += 1
+            if self.kaputt_ab is not None and self.ausschnitte > self.kaputt_ab:
+                sc = {"code": "CAPTURE_TOO_LARGE", "message": "m"}
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {
+                    "isError": True, "structuredContent": sc, "content": []}})
+        marke = b"G" if arg["target"] == "canvas" else b"%d" % self.ausschnitte
+        res: dict = {"content": [{"type": "image", "data": base64.b64encode(b"\x89PNG\r\n\x1a\n" + marke).decode(),
+                                  "mimeType": "image/png"}]}
+        if arg["target"] == "canvas" and self.struktur is not None:
+            res["structuredContent"] = self.struktur
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": res})
+
+
+MASSSTAB = {"width": 1000, "height": 500,
+            "mapping": {"origin": {"x": 100, "y": 50}, "pixelsPerLogicalUnit": {"x": 0.5, "y": 0.5}}}
+
+
+def test_kacheln_teilt_breite_flaechen_in_lesbare_ausschnitte() -> None:
+    from spaces.learning.huelle.penecho_mcp import kacheln
+
+    assert kacheln({"x": 100, "y": 50, "w": 2000, "h": 1000}) == [
+        {"x": 100, "y": 50, "w": 1000, "h": 1000}, {"x": 1100, "y": 50, "w": 1000, "h": 1000}]
+    assert kacheln({"x": 0, "y": 0, "w": 900, "h": 600}) == [{"x": 0, "y": 0, "w": 900, "h": 600}]
+    hoch = kacheln({"x": 0, "y": 0, "w": 1000, "h": 3000})
+    assert [k["y"] for k in hoch] == [0, 1000, 2000] and all(k["h"] == 1000 for k in hoch)
+    # Zeile fuer Zeile, von links nach rechts.
+    assert [(k["x"], k["y"]) for k in kacheln({"x": 0, "y": 0, "w": 2200, "h": 2800})] == [
+        (0, 0), (1100, 0), (0, 1400), (1100, 1400)]
+    assert kacheln({"x": 0, "y": 0, "w": 9000, "h": 9000}) == []  # zu viele Ausschnitte: es bleibt beim Gesamtbild
+    assert kacheln({"x": 0, "y": 0, "w": 0, "h": 10}) == []
+
+
+def test_flaeche_teile_nimmt_gesamtbild_und_ausschnitte_auf(zustand: Path) -> None:
+    fake = KachelFake(MASSSTAB)
+    ganz, teile = _client(zustand, fake).flaeche_teile("sess-1", timeout=3.0)
+    assert ganz.endswith(b"G") and [t[-1:] for t in teile] == [b"1", b"2"]
+    args = [a["arguments"] for a in fake.aufrufe("penecho_capture_canvas")]
+    assert args[0] == {"sessionId": "sess-1", "target": "canvas", "quality": "basic"}
+    assert args[1:] == [
+        {"sessionId": "sess-1", "target": "region", "region": {"x": 100, "y": 50, "w": 1000, "h": 1000}, "quality": "detail"},
+        {"sessionId": "sess-1", "target": "region", "region": {"x": 1100, "y": 50, "w": 1000, "h": 1000}, "quality": "detail"}]
+
+
+def test_flaeche_teile_ohne_massstab_oder_bei_fehler_bleibt_das_gesamtbild(zustand: Path) -> None:
+    for fake in (KachelFake(None), KachelFake({"width": 1000, "height": 500}), KachelFake(MASSSTAB, kaputt_ab=1),
+                 KachelFake({**MASSSTAB, "mapping": {"origin": {"x": "a", "y": 0}, "pixelsPerLogicalUnit": {"x": 0, "y": 1}}})):
+        ganz, teile = _client(zustand, fake).flaeche_teile("sess-1", timeout=3.0)
+        assert ganz.endswith(b"G") and teile == ()  # nie halb: entweder alle Ausschnitte oder keiner
