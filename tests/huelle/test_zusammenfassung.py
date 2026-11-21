@@ -449,3 +449,36 @@ def test_ohne_reportlab_entsteht_die_einfache_fassung(monkeypatch: Any) -> None:
     monkeypatch.setitem(sys.modules, "spaces.learning.huelle.zusammenfassung_pdf", None)  # Import scheitert
     seiten = _text(als_pdf(_zusammenfassung(bilder=False)))
     assert len(seiten) == 4 and "Übersicht" in seiten[0]  # die alte Fassung: je Aufgabe eine Seite
+
+# ---- Der ganze Inhalt im PDF: begonnene Aufgaben, Fragen an den Tutor, Notizen (21.11.) ------------------------
+def test_gesetztes_pdf_begonnene_aufgabe_fragen_und_notizen() -> None:
+    aufgaben = (
+        AufgabeZeile(1, "Frage eins.", "42", "Richtig. Gut gemacht.", None),
+        AufgabeZeile(2, "Frage zwei.", "offen", "–", _png_gross(300, 200), ("solve",), begonnen=True,
+                     erklaerungen=(("Warum ist das so?", "Weil der Nutzen hoch ist."),)),
+        AufgabeZeile(3, "Frage drei.", "offen", "–", None),
+    )
+    z = Zusammenfassung("Kurs", date(2026, 11, 21), aufgaben, (),
+                        notizen=(("Quick Win", "Hoher Nutzen, wenig Aufwand."), ("Nur Titel", "")))
+    assert [gesetzt.status_von(a) for a in aufgaben] == ["richtig", "arbeit", "offen"]
+    pdf = als_pdf(z)
+    text = _alles(pdf)
+    assert "In Arbeit" in text and "1 von 3 Aufgaben bearbeitet, 1 davon richtig, 1 weitere begonnen." in text
+    # Die begonnene Aufgabe hat eine Karte mit ihrem Canvas und den Fragen; die nie geoeffnete nicht.
+    assert "Aufgabe 2" in text and "Warum ist das so?" in text and "Weil der Nutzen hoch ist." in text
+    assert "Aufgabe 3" not in text
+    assert sum(len(list(s.images)) for s in pypdf.PdfReader(io.BytesIO(pdf)).pages) == 1
+    assert "Ihre Notizen" in text and "Quick Win" in text and "Hoher Nutzen, wenig Aufwand." in text
+    assert "Nur Titel" in text
+    ohne = _alles(als_pdf(replace(z, notizen=())))
+    assert "Ihre Notizen" not in ohne
+
+
+def test_markdown_traegt_fragen_und_notizen() -> None:
+    a = AufgabeZeile(1, "Frage 1", "42", "Richtig.", None, erklaerungen=(("Warum?", "Darum."),))
+    text = als_markdown(Zusammenfassung("Kurs", date(2026, 11, 21), (a,), (), notizen=(("Begriff", "Erklärung."),)))
+    zeilen = text.splitlines()
+    assert "Frage an den Tutor: Warum?" in zeilen and "Antwort: Darum." in zeilen
+    i = zeilen.index("## Notizen")
+    assert zeilen[i + 1] == "- Begriff: Erklärung."
+    assert "## Notizen" not in als_markdown(Zusammenfassung("Kurs", date(2026, 11, 21), (a,), ()))

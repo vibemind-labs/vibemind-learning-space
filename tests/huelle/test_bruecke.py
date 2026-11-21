@@ -124,6 +124,10 @@ class FakePenEcho:
         self.dokumente_je_schluessel: dict[str, str] = {}
         # Sitzungen, die nur noch die Merkdatei kennt (Altbestand von vor einem Neustart der Huelle).
         self.gemerkte_sitzungen: dict[str, str] = {}
+        # Aufnahme des ganzen Canvas: eigenes Bild (None = `bild`), Fehler und die Zeitlimits je Aufruf.
+        self.ganzbild: bytes | None = None
+        self.ganz_fehler: Exception | None = None
+        self.ganz_timeouts: list[float | None] = []
 
     def _pruefen(self, name: str) -> None:
         if self.unbekannt_einmal:
@@ -146,6 +150,14 @@ class FakePenEcho:
     def sitzung_schliessen(self, schluessel: str, session_id: str) -> None:
         self.aufrufe.append(("sitzung_schliessen", schluessel, session_id))
         self.gemerkte_sitzungen.pop(schluessel, None)
+
+    def ganze_flaeche(self, session_id: str, *, timeout: float | None = None) -> bytes:
+        """Alles, was auf dem Canvas liegt, als ein Bild (Aufnahmeziel „canvas“)."""
+        self.aufrufe.append(("ganze_flaeche", session_id))
+        self.ganz_timeouts.append(timeout)
+        if self.ganz_fehler is not None:
+            raise self.ganz_fehler
+        return self.ganzbild if self.ganzbild is not None else self.bild
 
     def sitzungen_von(self, wurzel: str) -> dict[str, str]:
         return {k: v for k, v in self.gemerkte_sitzungen.items() if k.startswith(f"{wurzel}#")}

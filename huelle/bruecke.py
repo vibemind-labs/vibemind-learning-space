@@ -186,6 +186,11 @@ KI_SCHRITTE_MAX = 200
 KI_NUMMER_MAX = 500
 _KI_AUSLOESER = frozenset({"manuell", "auto"})
 MAX_FRAGE = 500
+# Aufnahme des ganzen Canvas beim Verlassen einer Aufgabe: laenger wartet der Aufgabenwechsel nie darauf.
+GANZBILD_ZEITLIMIT_S = 4.0
+# „Erklaer mir das“ je Aufgabe aufbewahrt: so viele Wechsel, jede Seite hoechstens so lang.
+ERKLAERUNGEN_MAX = 12
+ERKLAERUNG_ZEICHEN = 4000
 SMILEYS = frozenset({"gut", "mittel", "schlecht"})
 _PNG = b"\x89PNG\r\n\x1a\n"
 _NAMENSRAUM = UUID("0b8f6c1e-3a7d-4f52-9c1e-6d2a4b7e9f30")
@@ -752,6 +757,11 @@ class Bruecke:
         self._rueckmeldung_datei = None if kursende is None else kursende.parent / "kursrueckmeldungen.json"
         self._rueckmeldung_sperre = threading.Lock()
         self._kursrueckmeldungen = self._kursrueckmeldungen_lesen()
+        # „Erklaer mir das“: Frage und Antwort je Sitzung und Aufgabe (`{sid: {nummer: [[frage, antwort]]}}`),
+        # neben kursende.json. Vorher lebten sie nur im Speicher der Seite und waren nach dem Neuladen weg.
+        self._erklaer_datei = None if kursende is None else kursende.parent / "erklaerungen.json"
+        self._erklaer_sperre = threading.Lock()
+        self._erklaerungen = self._erklaerungen_lesen_datei()
         self._ablauf = asyncio.Lock()
         # PenEchoMcp ist nicht fuer parallele Aufrufe gebaut: jeder Flaechenaufruf (Handler wie Spur) laeuft
         # unter dieser Sperre. Reentrant, weil ein Handler verschachtelte Flaechenhelfer ruft.
@@ -1031,16 +1041,17 @@ class Bruecke:
         with self._je_sperre:
             return sid in self._je_aufgabe
 
-    def _aufnahme_pfad(self, sid: str, nummer: int) -> Path | None:
-        """`<learning-huelle>/aufnahmen/<sid>/<nummer>.png`; nur fuer eine echte Sitzungskennung und Nummer >= 1."""
+    def _aufnahme_pfad(self, sid: str, nummer: int, *, ganz: bool = False) -> Path | None:
+        """`<learning-huelle>/aufnahmen/<sid>/<nummer>.png`; nur fuer eine echte Sitzungskennung und Nummer >= 1.
+        `ganz`: das Bild des ganzen Canvas (`<nummer>-ganz.png`) statt der Aufnahme der Abgabe."""
         if self._aufnahmen_ordner is None or _uuid(sid) != sid or isinstance(nummer, bool) or nummer < 1:
             return None
-        return self._aufnahmen_ordner / sid / f"{int(nummer)}.png"
+        return self._aufnahmen_ordner / sid / (f"{int(nummer)}-ganz.png" if ganz else f"{int(nummer)}.png")
 
-    def _aufnahme_merken(self, sid: str, nummer: int, png: bytes) -> None:
+    def _aufnahme_merken(self, sid: str, nummer: int, png: bytes, *, ganz: bool = False) -> None:
         """Aufnahme einer Abgabe ablegen, atomar (Temp-Datei + replace) und ueberschreibend. Ein Schreibfehler haelt
         die Abgabe nie auf (nur der Typ wird geloggt)."""
-        ziel = self._aufnahme_pfad(sid, nummer)
+        ziel = self._aufnahme_pfad(sid, nummer, ganz=ganz)
         if ziel is None:
             return
         tmp: str | None = None
@@ -1055,15 +1066,101 @@ class Bruecke:
             if tmp is not None:
                 Path(tmp).unlink(missing_ok=True)
 
-    def _aufnahme_lesen(self, sid: str, nummer: int) -> bytes | None:
+    def _aufnahme_lesen(self, sid: str, nummer: int, *, ganz: bool = False) -> bytes | None:
         """Die gespeicherte Aufnahme der Aufgabe; keine oder nicht lesbar: None."""
-        pfad = self._aufnahme_pfad(sid, nummer)
+        pfad = self._aufnahme_pfad(sid, nummer, ganz=ganz)
         if pfad is None:
             return None
         try:
             return pfad.read_bytes()
         except OSError:
             return None
+
+    def _ganzbild_aufnehmen(self, sitzung: _Sitzung, nummer: int) -> None:
+        """Alles auf dem Canvas der Aufgabe `nummer` aufnehmen und ablegen (`<nummer>-ganz.png`), still.
+
+        Nur solange dieses Canvas vorn steht und seine Sitzung offen ist: die Lernflaeche nimmt nur Sichtbares auf.
+        Darum beim Verlassen einer Aufgabe (vor dem Zeigen der naechsten) und beim Abruf der Zusammenfassung. Ein
+        Fehler oder das Zeitlimit laesst nur dieses Bild weg; ein frueheres bleibt dann liegen.
+        Anlass 21.11.: die Zusammenfassung zeigte nur die Aufnahme der Abgabe (bei Ergebnisfeld nur dieses Feld);
+        Erklaerungen der KI, Skizzen, Bilder und alles zu nicht abgegebenen Aufgaben fehlten."""
+        if not sitzung.je_aufgabe or sitzung.vorn != nummer:
+            return
+        try:
+            with self._flaeche_sperre:
+                board = sitzung.aufgaben_boards.get(nummer)
+                if board is None:
+                    return
+                roh = self._penecho.ganze_flaeche(board, timeout=GANZBILD_ZEITLIMIT_S)
+            self._aufnahme_merken(sitzung.sid, nummer, _als_png(roh), ganz=True)
+        except Exception as fehler:  # noqa: BLE001 - ein Bild darf weder Wechsel noch Zusammenfassung aufhalten
+            log.warning("Ganzes Canvas von Aufgabe %d nicht aufgenommen: %s", nummer, _typ(fehler))
+
+    # ---- „Erklaer mir das“ je Aufgabe aufbewahren --------------------------------
+    def _erklaerungen_lesen_datei(self) -> dict[str, dict[str, list[list[str]]]]:
+        """`erklaerungen.json` als `{sid: {nummer: [[frage, antwort], ...]}}`; fehlend oder kaputt = leer,
+        Kaputtes faellt einzeln weg."""
+        if self._erklaer_datei is None:
+            return {}
+        try:
+            wert = json.loads(self._erklaer_datei.read_text(encoding="utf-8"))
+            items = list(wert.items())
+        except (OSError, ValueError, AttributeError):
+            return {}
+        ergebnis: dict[str, dict[str, list[list[str]]]] = {}
+        for sid, je_nummer in items:
+            if not isinstance(sid, str) or not isinstance(je_nummer, dict):
+                continue
+            for nummer, paare in je_nummer.items():
+                if not (isinstance(nummer, str) and nummer.isdigit() and isinstance(paare, list)):
+                    continue
+                gut = [[p[0], p[1]] for p in paare[-ERKLAERUNGEN_MAX:]
+                       if isinstance(p, list) and len(p) == 2 and all(isinstance(t, str) for t in p)]
+                if gut:
+                    ergebnis.setdefault(sid, {})[nummer] = gut
+        return ergebnis
+
+    def _erklaerungen_von(self, sid: str, nummer: int) -> tuple[tuple[str, str], ...]:
+        with self._erklaer_sperre:
+            return tuple((f, a) for f, a in self._erklaerungen.get(sid, {}).get(str(nummer), ()))
+
+    def _erklaerung_merken(self, sid: str, nummer: int, frage: str, antwort: str) -> None:
+        """Haengt einen Wechsel an (die juengsten `ERKLAERUNGEN_MAX` je Aufgabe bleiben); atomar gespeichert. Ein
+        Schreibfehler haelt die Antwort nie auf."""
+        with self._erklaer_sperre:
+            liste = self._erklaerungen.setdefault(sid, {}).setdefault(str(nummer), [])
+            liste.append([frage[:ERKLAERUNG_ZEICHEN], antwort[:ERKLAERUNG_ZEICHEN]])
+            del liste[:-ERKLAERUNGEN_MAX]
+            if self._erklaer_datei is None:
+                return
+            ziel = self._erklaer_datei
+            tmp: str | None = None
+            try:
+                ziel.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=ziel.parent, suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(self._erklaerungen, f, ensure_ascii=False)
+                os.replace(tmp, ziel)
+            except OSError as fehler:
+                log.warning("Erklaerung nicht gespeichert: %s", _typ(fehler))
+                if tmp is not None:
+                    Path(tmp).unlink(missing_ok=True)
+
+    def _notizen_zeilen(self, sitzung: _Sitzung) -> tuple[tuple[str, str], ...]:
+        """(Auswahl oder Titel, Erklaerung) der Notizen der Person zu diesem Kurs, fuer die Zusammenfassung. Ist
+        Learning nicht erreichbar, entsteht sie ohne Notizen."""
+        try:
+            notizen = self._notizen(sitzung.actor, sitzung.kurs.course_id)["notes"]
+        except Exception as fehler:  # noqa: BLE001 - ohne Notizen gibt es die Zusammenfassung trotzdem
+            log.warning("Zusammenfassung ohne Notizen: %s", _typ(fehler))
+            return ()
+        zeilen = []
+        for n in notizen:
+            titel = n.get("selection") or n.get("title") or ""
+            text = n.get("explanation") or ""
+            if isinstance(titel, str) and isinstance(text, str) and (titel.strip() or text.strip()):
+                zeilen.append((titel.strip(), text.strip()))
+        return tuple(zeilen)
 
     # ---- Ein Canvas je Aufgabe: Kursrueckmeldung ---------------------------------
     def _kursrueckmeldungen_lesen(self) -> dict[str, Kursrueckmeldung]:
@@ -2039,8 +2136,11 @@ class Bruecke:
         turn, eintraege = self._liste_lesen(sitzung)
         rueckmeldung: Kursrueckmeldung | None = None
         if sitzung.je_aufgabe:
-            aufnahmen: list[bytes | None] = [self._aufnahme_lesen(sitzung.sid, e["nummer"]) if bilder else None
-                                             for e in eintraege]
+            # Das ganze Canvas geht vor; die Aufnahme der Abgabe bleibt fuer Aufgaben ohne ein solches Bild.
+            aufnahmen: list[bytes | None] = [
+                (self._aufnahme_lesen(sitzung.sid, e["nummer"], ganz=True)
+                 or self._aufnahme_lesen(sitzung.sid, e["nummer"])) if bilder else None
+                for e in eintraege]
             rueckmeldung = self._kursrueckmeldung_lesen(sitzung.sid)
         else:
             bereiche = self._bereiche(sitzung, eintraege)
@@ -2060,17 +2160,19 @@ class Bruecke:
             else:
                 aussage = kernaussage(vor, e["task"]) if isinstance(vor, dict) else "–"
                 ganz = kernaussage(vor, e["task"], grenze=None) if isinstance(vor, dict) else ""
+            ki_schritte = self._ki_schritte_lesen(sitzung.sid, e["nummer"])
+            erklaerungen = self._erklaerungen_von(sitzung.sid, e["nummer"])
             zeilen.append(AufgabeZeile(
                 e["nummer"], str(prompt) if prompt else "", ergebnis_von(e["status"], vor, e["task"], e.get("antwort")),
                 aussage, bild,
-                self._ki_schritte_lesen(sitzung.sid, e["nummer"]), richtig,
+                ki_schritte, richtig,
                 versuche=_versuche_von(e), erstes_urteil=_erstes_urteil_von(e), urteil=wort or _urteil_wort(vor),
-                rueckmeldung=ganz,
+                rueckmeldung=ganz, begonnen=bool(ki_schritte or erklaerungen), erklaerungen=erklaerungen,
             ))
         if sitzung.je_aufgabe and rueckmeldung is None and turn.get("state") == "completed":
             rueckmeldung = aus_zahlen(zeilen)
         return Zusammenfassung(sitzung.kurs.titel, date.today(), tuple(zeilen),
-                               self._begriffe_zeilen(sitzung), rueckmeldung)
+                               self._begriffe_zeilen(sitzung), rueckmeldung, self._notizen_zeilen(sitzung))
 
     @staticmethod
     def _aufnahme_fehler_einzeln(fehler: Exception) -> bool:
@@ -2164,6 +2266,8 @@ class Bruecke:
 
         def arbeit() -> dict[str, Any]:
             sitzung = self._listensitzung(actor, sid)
+            if sitzung.vorn is not None:
+                self._ganzbild_aufnehmen(sitzung, sitzung.vorn)  # sichtbar und der neueste Stand
             z = self._zusammenfassung_bauen(sitzung, bilder=True)
             pdf.append((als_pdf(z), f"zusammenfassung-{kurs_kurz(z.kurs)}-{z.datum:%Y-%m-%d}.pdf"))
             self._zusammenfassung_ablegen(sitzung, z)
@@ -2530,6 +2634,8 @@ class Bruecke:
         """
         neu = self._ohne_canvas(sitzung, nummer)
         bisher = sitzung.vorn
+        if bisher is not None and bisher != nummer:
+            self._ganzbild_aufnehmen(sitzung, bisher)  # solange das verlassene Canvas noch vorn steht
         sitzung.vorn = nummer  # ab hier gilt sie als vorn: `_auf_nummer_still` beendet sonst ihre Sitzung gleich
         if neu:
             ok = self._still(lambda: self._einzel_setzen(sitzung, task, nummer, zeigen=True))
@@ -3893,6 +3999,10 @@ class Bruecke:
         # Anweisung an eine Lehrkraft, samt erwarteter Werte. Die Antwort endet ohnehin mit einer Frage.
         antwort = _ohne_quellenmarken(tutor["answer"])
         sitzung.tutor = (sitzung.tutor + [(frage, antwort)])[-TUTOR_VERLAUF:]
+        # Fuer die Zusammenfassung: zur Aufgabe, die gerade vorn steht (ein Canvas je Aufgabe), sonst zur laufenden.
+        nummer = sitzung.vorn if sitzung.je_aufgabe else sitzung.nummer
+        if isinstance(nummer, int) and not isinstance(nummer, bool) and nummer >= 1:
+            self._erklaerung_merken(sid, nummer, frage, antwort)
         return {"answer": antwort}
 
     async def _r_code_ausfuehren(self, request: Request) -> JSONResponse:

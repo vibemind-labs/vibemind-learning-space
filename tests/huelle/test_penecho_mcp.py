@@ -2667,3 +2667,12 @@ def test_eigenes_board_ist_keine_gruppensitzung(zustand: Path) -> None:
     client._merken({"k": "0123abcdef", "g": "gfedcba"}, client._tabdatei)
     assert not client._ist_gruppensitzung("sess-1") and client._ist_gruppensitzung("sess-2")
     assert not client._ist_gruppensitzung("unbekannt")
+
+
+def test_ganze_flaeche_nimmt_alles_auf_dem_canvas_auf(zustand: Path) -> None:
+    # 21.11.: die Zusammenfassung zeigte nur das Ergebnisfeld; Erklaerungen, Skizzen und Bilder daneben fehlten.
+    fake = Fake()
+    daten = _client(zustand, fake).ganze_flaeche("sess-1", timeout=3.0)
+    assert daten.startswith(b"\x89PNG")
+    arg = fake.aufrufe("penecho_capture_canvas")[0]["arguments"]
+    assert arg == {"sessionId": "sess-1", "target": "canvas", "quality": "detail"}

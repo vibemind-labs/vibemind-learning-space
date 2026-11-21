@@ -65,6 +65,8 @@ class AufgabeZeile:
     erstes_urteil: str | None = None    # Learnings Zustand des ersten bewerteten Versuchs
     urteil: str | None = None           # „richtig“ | „teilweise“ | „falsch“ des Versuchs, der zaehlt (falls gebucht)
     rueckmeldung: str = ""              # die ganze Rueckmeldung, ungekuerzt (PDF); leer: `kernaussage` gilt
+    begonnen: bool = False              # daran gearbeitet (KI auf der Flaeche, Frage an den Tutor), auch ohne Abgabe
+    erklaerungen: tuple[tuple[str, str], ...] = ()  # (Frage, Antwort) von „Erklaer mir das“ zu dieser Aufgabe
 
     @property
     def versuche_zeile(self) -> str:
@@ -92,6 +94,7 @@ class Zusammenfassung:
     aufgaben: tuple[AufgabeZeile, ...]
     begriffe: tuple[tuple[str, str], ...]
     rueckmeldung: Kursrueckmeldung | None = None
+    notizen: tuple[tuple[str, str], ...] = ()  # (Auswahl oder Titel, Erklaerung) der Notizen zum Kurs
 
     def abschnitte(self) -> tuple[tuple[str, str], ...]:
         """(Unterueberschrift, Text) der Kursrueckmeldung; ohne Rueckmeldung leer."""
@@ -375,10 +378,16 @@ def als_markdown(z: Zusammenfassung) -> str:
             f"Rückmeldung: {_einzeilig(a.kernaussage)}",
             *([a.versuche_zeile] if a.versuche_zeile else []),
             ki_genutzt(a.ki_schritte),
+            *(zeile for frage, antwort in a.erklaerungen
+              for zeile in (f"Frage an den Tutor: {_einzeilig(frage)}", f"Antwort: {_einzeilig(antwort)}")),
             "",
         ]
     zeilen.append("## Begriffe")
     zeilen += [f"- {_einzeilig(titel)}: {_einzeilig(stand)}" for titel, stand in z.begriffe]
+    if z.notizen:
+        zeilen += ["", "## Notizen"]
+        zeilen += [f"- {_einzeilig(titel)}: {_einzeilig(text)}" if _einzeilig(text) else f"- {_einzeilig(titel)}"
+                   for titel, text in z.notizen]
     return "\n".join(zeilen) + "\n"
 
 

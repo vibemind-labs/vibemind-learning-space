@@ -1824,14 +1824,20 @@ class PenEchoMcp:
                     raise PenEchoBeschaeftigt("CANVAS_BUSY") from None
                 _schlafen(ZEIGEN_ABSTAND_S)
 
-    def _aufnahme(self, session_id: str, region: dict[str, int], timeout: float | None = None) -> bytes:
-        # schema.js:666 penecho_capture_canvas: target "region" verlangt region {x,y,w,h};
-        # das Bild kommt als content-Eintrag type "image" (base64 in data), protocol.js:28-37.
+    def ganze_flaeche(self, session_id: str, *, timeout: float | None = None) -> bytes:
+        """Alles, was auf dem Canvas liegt, als ein Bild: Aufnahmeziel „canvas“ (schema.js CAPTURE_TARGETS), bei
+        der Lernflaeche die Grenzen des ganzen Inhalts samt Handschrift (`canvasAgentContentBounds`). Fuer die
+        Zusammenfassung: die Aufnahme einer Abgabe zeigt nur das Rechteck der Aufgabe oder ihr Ergebnisfeld."""
+        return self._aufnahme(session_id, None, timeout)
+
+    def _aufnahme(self, session_id: str, region: dict[str, int] | None, timeout: float | None = None) -> bytes:
+        # schema.js:666 penecho_capture_canvas: target "region" verlangt region {x,y,w,h}; ohne `region` das Ziel
+        # "canvas". Das Bild kommt als content-Eintrag type "image" (base64 in data), protocol.js:28-37.
         grenze = {} if timeout is None else {"timeout": timeout}
+        ziel: dict[str, Any] = {"target": "canvas"} if region is None else {"target": "region", "region": region}
         ergebnis = self._werkzeug("penecho_capture_canvas", {
             "sessionId": session_id,
-            "target": "region",
-            "region": region,
+            **ziel,
             "quality": "detail",
         }, **grenze)
         for teil in ergebnis.get("content") or []:

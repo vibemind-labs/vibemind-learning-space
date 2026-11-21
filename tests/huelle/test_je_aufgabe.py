@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
+from spaces.learning.huelle import bruecke as bruecke_modul
 from spaces.learning.huelle.anordnung import EINZEL_RECHTECK, ZuVieleAufgaben, anordnung
 from spaces.learning.huelle.bruecke import _Sitzung
 from spaces.learning.huelle.einstellung import Kurs
@@ -953,7 +954,8 @@ def test_zusammenfassung_je_aufgabe_aus_aufnahmen_auch_ueber_zwanzig(tmp_path: P
         vorher = len(penecho.aufrufe)
         r = client.get(f"/lernen/api/sitzungen/{SID}/zusammenfassung.pdf")
         assert r.status_code == 200 and r.content.startswith(b"%PDF")
-        assert penecho.aufrufe[vorher:] == []  # keine Aufnahme, kein Board
+        # Nur das Canvas vorn wird frisch aufgenommen (es ist sichtbar); kein anderes Board, keine Anordnung.
+        assert penecho.aufrufe[vorher:] == [("ganze_flaeche", "board-1")]
         z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=True)
         assert [a.bild for a in z.aufgaben][:2] == [PNG, None] and z.aufgaben[29].bild == PNG
         assert z.rueckmeldung is not None and (z.rueckmeldung.staerken, z.rueckmeldung.quelle) == ("S", "ki_flaeche")
@@ -1639,3 +1641,167 @@ def test_verlassene_aufgabe_gilt_weiter_als_geoeffnet(tmp_path: Path) -> None:
         assert ("bereich_zeigen", "board-1", EINZEL_RECHTECK) in neu
     finally:
         client.app.beenden()
+
+# ---- Zusammenfassung mit dem ganzen Inhalt -------------------------------------------------------------------
+# 21.11.: das PDF zeigte je Aufgabe nur die Aufnahme der Abgabe (bei Ergebnisfeld nur dieses Feld). Erklaerungen
+# der KI, Skizzen, Bilder und alles zu nicht abgegebenen Aufgaben fehlten, ebenso Notizen und „Erklaer mir das“.
+
+def _png_farbe(farbe: str) -> bytes:
+    import io
+
+    from PIL import Image
+
+    puffer = io.BytesIO()
+    Image.new("RGB", (6, 4), farbe).save(puffer, format="PNG")
+    return puffer.getvalue()
+
+
+def _groesse(png: bytes | None) -> tuple[int, int] | None:
+    import io
+
+    from PIL import Image
+
+    return None if png is None else Image.open(io.BytesIO(png)).size
+
+
+def _ganzbild(tmp_path: Path, nummer: int) -> Path:
+    return tmp_path / "aufnahmen" / SID / f"{nummer}-ganz.png"
+
+
+def test_verlassen_nimmt_das_ganze_canvas_auf(tmp_path: Path) -> None:
+    client, penecho, _ = _oeffnen(_neu_lern(3), tmp_path)
+    try:
+        penecho.ganzbild = _png_farbe("red")
+        assert not _ganzbild(tmp_path, 1).exists()
+        assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 2}).status_code == 200
+        assert _groesse(_ganzbild(tmp_path, 1).read_bytes()) == (6, 4)
+        assert not _ganzbild(tmp_path, 2).exists()  # die neue Aufgabe ist noch nicht verlassen
+        namen = [a[:2] for a in penecho.aufrufe]
+        # Aufgenommen wird, solange das alte Canvas noch vorn steht: vor dem Zeigen des neuen und vor dem Schliessen.
+        assert namen.index(("ganze_flaeche", "board-1")) < namen.index(("bereich_zeigen", "board-2"))
+        assert namen.index(("ganze_flaeche", "board-1")) < [a[0] for a in penecho.aufrufe].index("sitzung_schliessen")
+        assert penecho.ganz_timeouts == [bruecke_modul.GANZBILD_ZEITLIMIT_S]
+    finally:
+        client.app.beenden()
+
+
+def test_dieselbe_aufgabe_erneut_zeigen_nimmt_nichts_auf(tmp_path: Path) -> None:
+    client, penecho, _ = _oeffnen(_neu_lern(3), tmp_path)
+    try:
+        assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 1}).status_code == 200
+        assert "ganze_flaeche" not in [a[0] for a in penecho.aufrufe]
+    finally:
+        client.app.beenden()
+
+
+def test_scheitert_die_aufnahme_gelingt_der_wechsel_trotzdem(tmp_path: Path) -> None:
+    client, penecho, _ = _oeffnen(_neu_lern(3), tmp_path)
+    try:
+        penecho.ganz_fehler = PenEchoNichtErreichbar("werkzeug")
+        r = client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 2})
+        assert r.status_code == 200 and r.json()["flaeche"] is True
+        assert not _ganzbild(tmp_path, 1).exists()
+        assert client.app._sitzungen[SID].aufgaben_boards == {2: "board-2"}
+    finally:
+        client.app.beenden()
+
+
+def test_zusammenfassung_zeigt_das_ganze_canvas_statt_des_ausschnitts(tmp_path: Path) -> None:
+    ll = _neu_lern(3)
+    client, penecho, _ = _oeffnen(ll, tmp_path)
+    bruecke = client.app
+    try:
+        penecho.ganzbild = _png_farbe("blue")
+        bruecke._aufnahme_merken(SID, 1, PNG)  # die Aufnahme einer Abgabe
+        assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 2}).status_code == 200
+        vorher = len(penecho.aufrufe)
+        assert client.get(f"/lernen/api/sitzungen/{SID}/zusammenfassung.pdf").status_code == 200
+        # Beim Abruf wird das Canvas vorn noch einmal aufgenommen: es ist sichtbar und sein Stand der neueste.
+        assert [a for a in penecho.aufrufe[vorher:] if a[0] == "ganze_flaeche"] == [("ganze_flaeche", "board-2")]
+        z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=True)
+        assert _groesse(z.aufgaben[0].bild) == (6, 4)  # das ganze Canvas, nicht die Abgabe-Aufnahme
+        assert _groesse(z.aufgaben[1].bild) == (6, 4)
+        assert z.aufgaben[2].bild is None  # nie geoeffnet
+        assert bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=False).aufgaben[0].bild is None
+    finally:
+        bruecke.beenden()
+
+
+def test_ohne_ganzbild_bleibt_die_aufnahme_der_abgabe(tmp_path: Path) -> None:
+    client, _, _ = _oeffnen(_neu_lern(3), tmp_path)
+    bruecke = client.app
+    try:
+        bruecke._aufnahme_merken(SID, 3, PNG)
+        z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=True)
+        assert z.aufgaben[2].bild == PNG
+    finally:
+        bruecke.beenden()
+
+
+def test_begonnene_aufgabe_ohne_abgabe_ist_in_arbeit(tmp_path: Path) -> None:
+    client, _, _ = _oeffnen(_neu_lern(3), tmp_path)
+    bruecke = client.app
+    try:
+        bruecke._ki_schritt_merken(SID, 2, "solve")
+        z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=False)
+        assert [a.begonnen for a in z.aufgaben] == [False, True, False]
+    finally:
+        bruecke.beenden()
+
+
+def test_erklaer_mir_das_wird_je_aufgabe_aufbewahrt(tmp_path: Path) -> None:
+    ll = _neu_lern(3)
+    ll.lern.antworten["learning_tutor_ask"] = {"tutor": {"answer": "Weil der Nutzen hoch ist (S2).", "next_step": "x",
+                                                         "source_refs": [], "evidence_ref": "e"}}
+    client, _, _ = _oeffnen(ll, tmp_path)
+    bruecke = client.app
+    try:
+        assert client.post(f"/lernen/api/sitzungen/{SID}/zeigen", json={"nummer": 2}).status_code == 200
+        r = client.post(f"/lernen/api/sitzungen/{SID}/erklaeren", json={"frage": "Warum ist das ein Quick Win?"})
+        assert r.status_code == 200 and r.json() == {"answer": "Weil der Nutzen hoch ist."}
+        z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=False)
+        assert z.aufgaben[1].erklaerungen == (("Warum ist das ein Quick Win?", "Weil der Nutzen hoch ist."),)
+        assert z.aufgaben[0].erklaerungen == () and z.aufgaben[1].begonnen is True
+        # Auf Platte, damit es einen Neustart der Huelle uebersteht.
+        gespeichert = json.loads((tmp_path / "erklaerungen.json").read_text(encoding="utf-8"))
+        assert gespeichert == {SID: {"2": [["Warum ist das ein Quick Win?", "Weil der Nutzen hoch ist."]]}}
+        assert bruecke._erklaerungen_lesen_datei() == gespeichert
+    finally:
+        bruecke.beenden()
+
+
+def test_zusammenfassung_traegt_die_notizen_des_kurses(tmp_path: Path) -> None:
+    def api(request: Any) -> Any:
+        import httpx
+
+        return httpx.Response(200, json={"notes": [
+            {"id": "n1", "course_id": KURS, "selection": "Quick Win", "explanation": "Hoher Nutzen, wenig Aufwand."},
+            {"id": "n2", "course_id": "22222222-2222-4222-8222-222222222222", "selection": "fremd", "explanation": "x"},
+            {"id": "n3", "course_id": KURS, "title": "Nur Titel", "explanation": ""},
+        ]})
+
+    ll = _neu_lern(2)
+    client, _, _ = bauen(ll.lern, JePenEcho(), kursende=tmp_path / "kursende.json", api=api)
+    bruecke = client.app
+    try:
+        assert client.post(f"/lernen/api/kurse/{KURS}/oeffnen").status_code == 200
+        z = bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=False)
+        assert z.notizen == (("Quick Win", "Hoher Nutzen, wenig Aufwand."), ("Nur Titel", ""))
+    finally:
+        bruecke.beenden()
+
+
+def test_zusammenfassung_ohne_erreichbare_notizen_entsteht_trotzdem(tmp_path: Path) -> None:
+    def api(request: Any) -> Any:
+        import httpx
+
+        raise httpx.ConnectError("weg")
+
+    client, _, _ = bauen(_neu_lern(2).lern, JePenEcho(), kursende=tmp_path / "kursende.json", api=api)
+    bruecke = client.app
+    try:
+        assert client.post(f"/lernen/api/kurse/{KURS}/oeffnen").status_code == 200
+        assert bruecke._zusammenfassung_bauen(bruecke._sitzungen[SID], bilder=False).notizen == ()
+        assert client.get(f"/lernen/api/sitzungen/{SID}/zusammenfassung.pdf").status_code == 200
+    finally:
+        bruecke.beenden()

@@ -44,11 +44,12 @@ GRUEN, GRUEN_HELL = colors.HexColor("#1d7a3e"), colors.HexColor("#e7f3eb")
 GELB, GELB_HELL = colors.HexColor("#8a5a00"), colors.HexColor("#fff6dc")
 ROT, ROT_HELL = colors.HexColor("#8a1c13"), colors.HexColor("#fdecea")
 OFFEN, OFFEN_HELL = colors.HexColor("#55524a"), colors.HexColor("#f0eee8")
+BLAU, BLAU_HELL = colors.HexColor("#24507d"), colors.HexColor("#eef3f8")
 
 RAND = 18 * mm
 # Der Rahmen von ReportLab hat innen je 6 Punkt Luft; Tabellen in genau dieser Breite stehen buendig zum Text.
 BREITE = A4[0] - 2 * RAND - 12
-BILD_MAX_HOEHE = 78 * mm
+BILD_MAX_HOEHE = 105 * mm  # das ganze Canvas einer Aufgabe: Erklaerungen und Skizzen sollen lesbar bleiben
 # Ein Bildpunkt der Aufnahme wird hoechstens so gross: ein kleiner Ausschnitt (eine Zeile Schrift) fuellte
 # sonst die halbe Seite in Riesenschrift.
 PUNKT_JE_PIXEL = 0.42
@@ -61,8 +62,11 @@ STATUS = {
     "teilweise": ("Teilweise richtig", GELB, GELB_HELL),
     "falsch": ("Noch nicht richtig", ROT, ROT_HELL),
     "leer": ("Nicht bearbeitet", OFFEN, OFFEN_HELL),
+    "arbeit": ("In Arbeit", BLAU, BLAU_HELL),
     "offen": ("Offen", OFFEN, OFFEN_HELL),
 }
+# Diese Aufgaben stehen ausfuehrlich als Karte da; „offen“ nur als Zeile der Tabelle.
+MIT_KARTE = frozenset(STATUS) - {"offen"}
 
 
 def _schriften() -> None:
@@ -85,6 +89,7 @@ def _stil(name: str, **werte: Any) -> ParagraphStyle:
 
 TEXT = _stil("text")
 PUNKT = _stil("punkt", leftIndent=10, bulletIndent=1)
+FRAGE = _stil("frage", fontName=_FETT, spaceBefore=2)
 KLEIN = _stil("klein", fontSize=8.2, leading=11.5, textColor=GRAU)
 MARKE = _stil("marke", fontName=_FETT, fontSize=7.4, leading=10, textColor=GRAU)
 TITEL = _stil("titel", fontName=_FETT, fontSize=22, leading=27)
@@ -102,7 +107,8 @@ def _x(text: object) -> str:
 
 
 def status_von(a: AufgabeZeile) -> str:
-    """„richtig“ | „teilweise“ | „falsch“ | „leer“ (gebucht ohne Abgabe) | „offen“."""
+    """„richtig“ | „teilweise“ | „falsch“ | „leer“ (gebucht ohne Abgabe) | „arbeit“ (begonnen, noch nichts
+    abgegeben) | „offen“."""
     if a.ergebnis == NICHT_BEARBEITET:
         return "leer"
     if a.urteil in ("richtig", "teilweise", "falsch"):
@@ -113,7 +119,7 @@ def status_von(a: AufgabeZeile) -> str:
     if k.startswith("Teilweise"):
         return "teilweise"
     if not k or k == "–":
-        return "offen"
+        return "arbeit" if a.begonnen else "offen"
     return "falsch"
 
 
@@ -212,7 +218,8 @@ def _kachel(zahl: int, wort: str, farbe: Any, flaeche: Any, breite: float) -> Ta
 def _kopfblock(z: Zusammenfassung, zaehler: dict[str, int]) -> list[Any]:
     gesamt = len(z.aufgaben)
     richtig, teilweise = zaehler["richtig"], zaehler["teilweise"]
-    falsch, offen = zaehler["falsch"] + zaehler["leer"], zaehler["offen"]
+    falsch, begonnen = zaehler["falsch"] + zaehler["leer"], zaehler["arbeit"]
+    offen = zaehler["offen"] + begonnen
     luecke = 4 * mm
     breite = (BREITE - 3 * luecke) / 4
     kacheln = Table([[
@@ -234,7 +241,8 @@ def _kopfblock(z: Zusammenfassung, zaehler: dict[str, int]) -> list[Any]:
         Spacer(1, 4 * mm),
         _Balken(anteile, BREITE),
         Spacer(1, 2 * mm),
-        Paragraph(f"{bearbeitet} von {gesamt} Aufgaben bearbeitet, {richtig} davon richtig.", KLEIN),
+        Paragraph(f"{bearbeitet} von {gesamt} Aufgaben bearbeitet, {richtig} davon richtig"
+                  + (f", {begonnen} weitere begonnen." if begonnen else "."), KLEIN),
         Spacer(1, 7 * mm),
     ]
 
@@ -244,7 +252,7 @@ def _tabelle(z: Zusammenfassung) -> list[Any]:
     zeilen: list[list[Any]] = [kopf]
     for a in z.aufgaben:
         s = status_von(a)
-        ergebnis = "" if s == "offen" else _x(a.ergebnis)
+        ergebnis = "" if s in ("offen", "arbeit") else _x(a.ergebnis)
         zeilen.append([Paragraph(str(a.nummer), ZELLE), Paragraph(escape(erster_satz(a.text)), ZELLE),
                        Paragraph(ergebnis, ZELLE), _Pille(s)])
     spalten = [9 * mm, BREITE - 9 * mm - 50 * mm - 36 * mm, 50 * mm, 36 * mm]
@@ -281,7 +289,8 @@ def _karte(a: AufgabeZeile) -> Any:
                               ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
     inhalt: list[Any] = [kopf, Spacer(1, 3 * mm)]
     inhalt += _feld("AUFGABE", _absaetze(_einzeilig(ohne_latex(a.text))))
-    inhalt += _feld("IHR ERGEBNIS", _absaetze(_einzeilig(ohne_latex(a.ergebnis))))
+    if status_von(a) != "arbeit":  # begonnen, aber nichts abgegeben: es gibt noch kein Ergebnis
+        inhalt += _feld("IHR ERGEBNIS", _absaetze(_einzeilig(ohne_latex(a.ergebnis))))
     einleitung, punkte = rueckmeldung_teile(a.rueckmeldung or a.kernaussage)
     if einleitung:
         liste = _absaetze(einleitung)
@@ -295,6 +304,12 @@ def _karte(a: AufgabeZeile) -> Any:
                                     ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 4),
                                     ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
         inhalt += _feld("IHRE FLÄCHE", [Spacer(1, 1 * mm), rahmen])
+    if a.erklaerungen:
+        fragen: list[Any] = []
+        for frage, antwort in a.erklaerungen:
+            fragen += [Paragraph(escape(_einzeilig(ohne_latex(frage))), FRAGE),
+                       *_absaetze(_einzeilig(ohne_latex(antwort)))]
+        inhalt += _feld("IHRE FRAGEN AN DEN TUTOR", fragen)
     fuss = " · ".join(t for t in (a.versuche_zeile, ki_genutzt(a.ki_schritte)) if t)
     inhalt.append(Paragraph(escape(fuss), KLEIN))
     # Je Baustein eine Tabellenzeile: so bricht eine Karte, die laenger als eine Seite ist, zwischen den
@@ -327,7 +342,7 @@ def _absaetze(text: str, *, punkt: bool = False) -> list[Any]:
 
 
 def _karten(z: Zusammenfassung) -> list[Any]:
-    bearbeitet = [a for a in z.aufgaben if status_von(a) != "offen"]
+    bearbeitet = [a for a in z.aufgaben if status_von(a) in MIT_KARTE]
     if not bearbeitet:
         return []
     # Kein Seitenwechsel davor: die Karten schliessen an die Tabelle an. Die Ueberschrift bleibt bei der ersten.
@@ -363,6 +378,22 @@ def _begriffe(z: Zusammenfassung) -> list[Any]:
     if not z.begriffe:
         teile.append(Paragraph("Noch keine Begriffe.", KLEIN))
     return [KeepTogether(teile)]
+
+
+def _notizen(z: Zusammenfassung) -> list[Any]:
+    """„Ihre Notizen“: je Notiz die Auswahl (oder der Titel) und darunter die Erklaerung; ohne Notizen nichts."""
+    if not z.notizen:
+        return []
+    teile: list[Any] = [Spacer(1, 6 * mm), Paragraph("Ihre Notizen", ABSCHNITT)]
+    for titel, text in z.notizen:
+        block: list[Any] = [Paragraph(_x(titel) or "Notiz", FRAGE)]
+        if text.strip():
+            block += _absaetze(_einzeilig(ohne_latex(text)))
+        block.append(Spacer(1, 2.5 * mm))
+        teile.append(KeepTogether(block) if len(text) < 900 else block[0])
+        if len(text) >= 900:
+            teile += block[1:]
+    return teile
 
 
 class _Zaehlend(Canvas):
@@ -409,6 +440,7 @@ def als_pdf(z: Zusammenfassung) -> bytes:
     puffer = io.BytesIO()
     doc = SimpleDocTemplate(puffer, pagesize=A4, leftMargin=RAND, rightMargin=RAND, topMargin=19 * mm,
                             bottomMargin=17 * mm, title=f"{kurs} – Zusammenfassung", author="Lern-Hülle")
-    doc.build([*_kopfblock(z, zaehler), *_tabelle(z), *_kursrueckmeldung(z), *_karten(z), *_begriffe(z)],
+    doc.build([*_kopfblock(z, zaehler), *_tabelle(z), *_kursrueckmeldung(z), *_karten(z), *_notizen(z),
+               *_begriffe(z)],
               canvasmaker=zeichner)
     return puffer.getvalue()
